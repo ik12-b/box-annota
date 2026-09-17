@@ -25,8 +25,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # packages is set explicitly to skip the legacy "tools" package,
+      # which Google removed from the SDK repository years ago — the
+      # action's default ("tools platform-tools") fails on modern runners.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
 
       - name: Install required SDK platform & build tools
         run: |
