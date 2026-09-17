@@ -70,6 +70,8 @@ fun AnnotationCanvasView(
     val handleTouchRadiusPx = with(density) { 26.dp.toPx() }
     val handleDrawRadiusPx = with(density) { 7.dp.toPx() }
 
+    val latestBoxes = androidx.compose.runtime.rememberUpdatedState(boxes)
+
     var crosshairPos by remember { mutableStateOf<Offset?>(null) }
     var activeHandle by remember { mutableStateOf(TouchHandle.NONE) }
     var activeDragBoxId by remember { mutableStateOf<String?>(null) }
@@ -178,7 +180,7 @@ fun AnnotationCanvasView(
                             rotationZ = currentRotation
                         }
                         .testTag("annotation_box_layer")
-                        .pointerInput(boxes, selectedBoxIds, isCrosshairEnabled, isSnappingEnabled) {
+                        .pointerInput(selectedBoxIds, isCrosshairEnabled, isSnappingEnabled) {
                             detectTapGestures { tapOffset ->
                                 val canvasW = size.width.toFloat()
                                 val canvasH = size.height.toFloat()
@@ -186,7 +188,7 @@ fun AnnotationCanvasView(
                                 val normY = tapOffset.y / canvasH
 
                                 // Check if tapped inside any box (topmost first)
-                                val tappedBox = boxes.asReversed().find { b ->
+                                val tappedBox = latestBoxes.value.asReversed().find { b ->
                                     normX in b.x..b.right && normY in b.y..b.bottom
                                 }
 
@@ -197,9 +199,10 @@ fun AnnotationCanvasView(
                                 }
                             }
                         }
-                        .pointerInput(boxes, primarySelectedBoxId, isSnappingEnabled) {
+                        .pointerInput(primarySelectedBoxId, isSnappingEnabled) {
                             detectDragGestures(
                                 onDragStart = { startOffset ->
+                                    val boxes = latestBoxes.value
                                     val canvasW = size.width.toFloat()
                                     val canvasH = size.height.toFloat()
                                     val normX = (startOffset.x / canvasW).coerceIn(0f, 1f)
