@@ -33,6 +33,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -46,6 +47,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.AddClassDialog
@@ -97,6 +101,21 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             delay(2800)
             viewModel.clearToast()
         }
+    }
+
+    // Flush any pending autosave the moment the app leaves the foreground.
+    // Android is free to kill the process any time after ON_STOP, so this is the
+    // last reliable point to guarantee unsaved edits actually reach disk instead
+    // of being lost with the process.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.flushSessionNow()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Scaffold(
@@ -178,6 +197,9 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             AnnotationCanvasView(
                 bitmap = uiState.currentPageBitmap,
                 isLoading = uiState.isLoadingPage,
+                hasDocument = uiState.hasDocument,
+                isRestoringSession = uiState.isRestoringSession,
+                onOpenPdf = { openPdfLauncher.launch(arrayOf("application/pdf")) },
                 boxes = uiState.currentBoxes,
                 classes = uiState.classes,
                 activeClassId = uiState.activeClassId,

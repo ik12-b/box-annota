@@ -30,7 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -50,6 +50,9 @@ private const val MIN_BOX_SIZE_NORM = 0.015f
 fun AnnotationCanvasView(
     bitmap: Bitmap?,
     isLoading: Boolean,
+    hasDocument: Boolean = true,
+    isRestoringSession: Boolean = false,
+    onOpenPdf: (() -> Unit)? = null,
     boxes: List<AnnotationBox>,
     classes: List<LabelClass>,
     activeClassId: Int,
@@ -85,6 +88,53 @@ fun AnnotationCanvasView(
             .background(Slate950),
         contentAlignment = Alignment.Center
     ) {
+        if (isRestoringSession) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = Color(0xFF6366F1))
+                Text(
+                    text = "Memulihkan sesi sebelumnya...",
+                    color = Color.LightGray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 70.dp)
+                )
+            }
+            return@Box
+        }
+
+        if (!hasDocument) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null,
+                        enabled = onOpenPdf != null
+                    ) { onOpenPdf?.invoke() }
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.foundation.layout.Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Belum ada PDF yang dibuka",
+                        color = Color.White,
+                        fontSize = 15.sp
+                    )
+                    Text(
+                        text = "Ketuk di sini atau gunakan tombol \"Buka PDF\" di toolbar untuk mulai memberi anotasi.",
+                        color = Color.LightGray,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+            return@Box
+        }
+
         if (bitmap == null || isLoading) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -170,15 +220,14 @@ fun AnnotationCanvasView(
                     )
                 }
 
-                // Box/overlay layer: this is the layer that rotates. It carries
-                // the crosshair guides, bounding boxes and drag handles, plus all
-                // pointer input, so only the boxes spin when currentRotation changes.
+                // Box/overlay layer: carries the crosshair guides, bounding boxes
+                // and drag handles, plus all pointer input. The layer itself is
+                // NOT rotated — only the currently selected box is spun (around
+                // its own center) when currentRotation changes, via a per-box
+                // rotate() inside the draw pass below.
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
-                        .graphicsLayer {
-                            rotationZ = currentRotation
-                        }
                         .testTag("annotation_box_layer")
                         .pointerInput(selectedBoxIds, isCrosshairEnabled, isSnappingEnabled) {
                             detectTapGestures { tapOffset ->
@@ -390,41 +439,48 @@ fun AnnotationCanvasView(
                         val pxW = box.width * canvasW
                         val pxH = box.height * canvasH
 
-                        // Fill with semi-transparency
-                        drawRect(
-                            color = boxColor.copy(alpha = if (isSelected) 0.35f else 0.18f),
-                            topLeft = Offset(pxX, pxY),
-                            size = Size(pxW, pxH)
-                        )
+                        // Only the primary-selected box is visually rotated (around
+                        // its own center); every other box is drawn upright.
+                        val boxRotationDeg = if (isPrimary) currentRotation else 0f
+                        val boxPivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
 
-                        // Border Stroke
-                        drawRect(
-                            color = boxColor,
-                            topLeft = Offset(pxX, pxY),
-                            size = Size(pxW, pxH),
-                            style = Stroke(width = if (isSelected) 3.5f else 2.2f)
-                        )
-
-                        // Draw Corner Handles for Primary Selection
-                        if (isPrimary) {
-                            val handles = listOf(
-                                Offset(pxX, pxY),
-                                Offset(pxX + pxW, pxY),
-                                Offset(pxX, pxY + pxH),
-                                Offset(pxX + pxW, pxY + pxH)
+                        rotate(degrees = boxRotationDeg, pivot = boxPivot) {
+                            // Fill with semi-transparency
+                            drawRect(
+                                color = boxColor.copy(alpha = if (isSelected) 0.35f else 0.18f),
+                                topLeft = Offset(pxX, pxY),
+                                size = Size(pxW, pxH)
                             )
-                            handles.forEach { h ->
-                                drawCircle(
-                                    color = Color.White,
-                                    radius = handleDrawRadiusPx,
-                                    center = h
+
+                            // Border Stroke
+                            drawRect(
+                                color = boxColor,
+                                topLeft = Offset(pxX, pxY),
+                                size = Size(pxW, pxH),
+                                style = Stroke(width = if (isSelected) 3.5f else 2.2f)
+                            )
+
+                            // Draw Corner Handles for Primary Selection
+                            if (isPrimary) {
+                                val handles = listOf(
+                                    Offset(pxX, pxY),
+                                    Offset(pxX + pxW, pxY),
+                                    Offset(pxX, pxY + pxH),
+                                    Offset(pxX + pxW, pxY + pxH)
                                 )
-                                drawCircle(
-                                    color = boxColor,
-                                    radius = handleDrawRadiusPx,
-                                    center = h,
-                                    style = Stroke(width = 2.5f)
-                                )
+                                handles.forEach { h ->
+                                    drawCircle(
+                                        color = Color.White,
+                                        radius = handleDrawRadiusPx,
+                                        center = h
+                                    )
+                                    drawCircle(
+                                        color = boxColor,
+                                        radius = handleDrawRadiusPx,
+                                        center = h,
+                                        style = Stroke(width = 2.5f)
+                                    )
+                                }
                             }
                         }
                     }

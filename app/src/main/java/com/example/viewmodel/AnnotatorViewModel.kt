@@ -11,7 +11,10 @@ import com.example.model.LabelClass
 import com.example.model.LabelPresets
 import com.example.pdf.PdfManager
 import com.example.util.DatasetExporter
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,11 +26,12 @@ import org.json.JSONObject
 import java.io.File
 
 data class AnnotatorUiState(
-    val pdfFileName: String = "sample_invoice",
+    val pdfFileName: String = "",
     val totalPages: Int = 0,
     val currentPage: Int = 1,
     val currentPageBitmap: Bitmap? = null,
     val isLoadingPage: Boolean = false,
+    val isRestoringSession: Boolean = true,
     val classes: List<LabelClass> = LabelPresets.GENERAL,
     val activeClassId: Int = 0,
     val pageAnnotations: Map<Int, List<AnnotationBox>> = emptyMap(),
@@ -63,6 +67,10 @@ data class AnnotatorUiState(
 
     val primarySelectedBox: AnnotationBox?
         get() = currentBoxes.find { it.id == primarySelectedBoxId }
+
+    /** No document loaded yet — distinct from "loading a page of a loaded document". */
+    val hasDocument: Boolean
+        get() = totalPages > 0
 }
 
 class AnnotatorViewModel(application: Application) : AndroidViewModel(application) {
@@ -71,6 +79,10 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     val pdfManager = PdfManager(context)
     private val datasetExporter = DatasetExporter(context)
 
+    // Any unexpected exception inside a fire-and-forget launch (render / autosave)
+    // is swallowed here instead of propagating and force-closing the app.
+    private val safetyNetHandler = CoroutineExceptionHandler { _, _ -> }
+
     private val _uiState = MutableStateFlow(AnnotatorUiState())
     val uiState: StateFlow<AnnotatorUiState> = _uiState.asStateFlow()
 
@@ -78,48 +90,27 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private val redoStacks = mutableMapOf<Int, MutableList<List<AnnotationBox>>>()
     private var copiedBoxes = listOf<AnnotationBox>()
 
+    // Only the most recently requested render matters — cancelling the previous
+    // job before starting a new one means flicking through pages quickly can no
+    // longer pile up concurrent renders that race each other.
+    private var renderJob: Job? = null
+
+    // Debounced, single-flight autosave.
+    private var saveJob: Job? = null
+
     private val sessionFile: File
         get() = File(context.filesDir, "annotator_session.json")
 
     init {
-        viewModelScope.launch {
-            val restored = tryRestoreSession()
-            if (!restored) {
-                loadSampleDocument()
-            }
-        }
-    }
-
-    fun loadSampleDocument() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingPage = true) }
-            try {
-                val file = pdfManager.loadSamplePdf()
-                val total = pdfManager.pageCount
-                _uiState.update {
-                    it.copy(
-                        pdfFileName = file.nameWithoutExtension,
-                        totalPages = total,
-                        currentPage = 1,
-                        classes = LabelPresets.GENERAL,
-                        activeClassId = 0,
-                        pageAnnotations = emptyMap(),
-                        pageRotations = emptyMap(),
-                        selectedBoxIds = emptySet(),
-                        primarySelectedBoxId = null
-                    )
-                }
-                renderCurrentPage()
-                showToast("Dokumen Contoh Berhasil Dimuat (${total} Halaman).")
-                saveSession()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(isLoadingPage = false, toastMessage = "Gagal memuat PDF contoh: ${e.message}") }
-            }
+        viewModelScope.launch(safetyNetHandler) {
+            tryRestoreSession()
+            _uiState.update { it.copy(isRestoringSession = false) }
         }
     }
 
     fun openPdfFromUri(uri: Uri) {
-        viewModelScope.launch {
+        renderJob?.cancel()
+        viewModelScope.launch(safetyNetHandler) {
             _uiState.update { it.copy(isLoadingPage = true) }
             try {
                 val file = pdfManager.openPdfFromUri(uri)
@@ -151,12 +142,24 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun renderCurrentPage() {
         val pageNum = _uiState.value.currentPage
         _uiState.update { it.copy(isLoadingPage = true) }
-        val bitmap = pdfManager.renderPage(pageNum - 1, targetWidthPx = 1200)
+        val bitmap = try {
+            pdfManager.renderPage(pageNum - 1, targetWidthPx = 1200)
+        } catch (_: Exception) {
+            null
+        }
+        val oldBitmap = _uiState.value.currentPageBitmap
         _uiState.update {
             it.copy(
                 currentPageBitmap = bitmap,
                 isLoadingPage = false
             )
+        }
+        // Free the previous page's bitmap now that nothing references it anymore —
+        // without this, every page render/rotation leaked a full ARGB_8888 bitmap,
+        // and enough of them (a long annotation session, a big PDF) ran the app out
+        // of memory and force-closed it.
+        if (oldBitmap != null && oldBitmap !== bitmap && !oldBitmap.isRecycled) {
+            oldBitmap.recycle()
         }
         checkOverlap()
     }
@@ -173,7 +176,8 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     canRedo = redoStacks[page]?.isNotEmpty() == true
                 )
             }
-            viewModelScope.launch {
+            renderJob?.cancel()
+            renderJob = viewModelScope.launch(safetyNetHandler) {
                 renderCurrentPage()
             }
             saveSession()
@@ -344,6 +348,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 state.copy(pageAnnotations = newMap)
             }
             checkOverlap()
+            saveSession()
         }
     }
 
@@ -536,7 +541,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         splitDataset: Boolean,
         trainRatio: Float
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(safetyNetHandler) {
             _uiState.update {
                 it.copy(
                     isExporting = true,
@@ -588,57 +593,107 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     fun clearToast() = _uiState.update { it.copy(toastMessage = null) }
     fun showToast(msg: String) = _uiState.update { it.copy(toastMessage = msg) }
 
+    /** Clears annotations/rotations/history for the current document (keeps the document itself open). */
     fun resetProject() {
         undoStacks.clear()
         redoStacks.clear()
-        sessionFile.delete()
-        loadSampleDocument()
+        _uiState.update {
+            it.copy(
+                currentPage = 1,
+                pageAnnotations = emptyMap(),
+                pageRotations = emptyMap(),
+                selectedBoxIds = emptySet(),
+                primarySelectedBoxId = null,
+                canUndo = false,
+                canRedo = false
+            )
+        }
+        if (_uiState.value.hasDocument) {
+            renderJob?.cancel()
+            renderJob = viewModelScope.launch(safetyNetHandler) { renderCurrentPage() }
+        }
+        showToast("Proyek direset.")
+        saveSession()
     }
 
+    /**
+     * Debounced autosave: rapid-fire edits (dragging a box, spamming undo) no
+     * longer each spawn their own disk write — only the last one in a burst
+     * actually writes, ~350ms after things go quiet.
+     */
     private fun saveSession() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val state = _uiState.value
-                val root = JSONObject()
-                root.put("fileName", state.pdfFileName)
-                root.put("totalPages", state.totalPages)
-                root.put("currentPage", state.currentPage)
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch(safetyNetHandler + Dispatchers.IO) {
+            delay(350)
+            writeSessionToDisk()
+        }
+    }
 
-                val classesArr = JSONArray()
-                state.classes.forEach { c ->
-                    classesArr.put(JSONObject().apply {
-                        put("id", c.id)
-                        put("name", c.name)
-                        put("color", c.colorValue)
-                        put("visible", c.visible)
+    /**
+     * Forces any pending autosave to disk immediately and synchronously. Call this
+     * from onStop/onPause — Android can kill the process at any point after that,
+     * and a debounced coroutine still waiting out its delay would simply never run.
+     */
+    fun flushSessionNow() {
+        saveJob?.cancel()
+        try {
+            writeSessionToDisk()
+        } catch (_: Exception) {}
+    }
+
+    private fun writeSessionToDisk() {
+        try {
+            val state = _uiState.value
+            if (!state.hasDocument) return
+
+            val root = JSONObject()
+            root.put("fileName", state.pdfFileName)
+            root.put("totalPages", state.totalPages)
+            root.put("currentPage", state.currentPage)
+            root.put("pdfFilePath", pdfManager.currentPdfFile?.absolutePath ?: "")
+
+            val classesArr = JSONArray()
+            state.classes.forEach { c ->
+                classesArr.put(JSONObject().apply {
+                    put("id", c.id)
+                    put("name", c.name)
+                    put("color", c.colorValue)
+                    put("visible", c.visible)
+                })
+            }
+            root.put("classes", classesArr)
+
+            val annoObj = JSONObject()
+            state.pageAnnotations.forEach { (pageNum, boxes) ->
+                val boxesArr = JSONArray()
+                boxes.forEach { b ->
+                    boxesArr.put(JSONObject().apply {
+                        put("id", b.id)
+                        put("classId", b.classId)
+                        put("x", b.x.toDouble())
+                        put("y", b.y.toDouble())
+                        put("width", b.width.toDouble())
+                        put("height", b.height.toDouble())
                     })
                 }
-                root.put("classes", classesArr)
+                annoObj.put(pageNum.toString(), boxesArr)
+            }
+            root.put("pageAnnotations", annoObj)
 
-                val annoObj = JSONObject()
-                state.pageAnnotations.forEach { (pageNum, boxes) ->
-                    val boxesArr = JSONArray()
-                    boxes.forEach { b ->
-                        boxesArr.put(JSONObject().apply {
-                            put("id", b.id)
-                            put("classId", b.classId)
-                            put("x", b.x.toDouble())
-                            put("y", b.y.toDouble())
-                            put("width", b.width.toDouble())
-                            put("height", b.height.toDouble())
-                        })
-                    }
-                    annoObj.put(pageNum.toString(), boxesArr)
-                }
-                root.put("pageAnnotations", annoObj)
+            val rotObj = JSONObject()
+            state.pageRotations.forEach { (p, rot) -> rotObj.put(p.toString(), rot.toDouble()) }
+            root.put("pageRotations", rotObj)
 
-                val rotObj = JSONObject()
-                state.pageRotations.forEach { (p, rot) -> rotObj.put(p.toString(), rot.toDouble()) }
-                root.put("pageRotations", rotObj)
-
+            // Write-to-temp-then-rename so a process death mid-write can never leave
+            // a half-written / corrupted session.json behind that fails to parse on
+            // the next launch (which used to look exactly like "lost all my data").
+            val tmpFile = File(context.filesDir, "annotator_session.json.tmp")
+            tmpFile.writeText(root.toString(2))
+            if (!tmpFile.renameTo(sessionFile)) {
                 sessionFile.writeText(root.toString(2))
-            } catch (_: Exception) {}
-        }
+                tmpFile.delete()
+            }
+        } catch (_: Exception) {}
     }
 
     private suspend fun tryRestoreSession(): Boolean = withContext(Dispatchers.IO) {
@@ -646,9 +701,18 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         try {
             val text = sessionFile.readText()
             val root = JSONObject(text)
-            val fileName = root.optString("fileName", "sample_invoice")
-            val total = root.optInt("totalPages", 1)
+            val fileName = root.optString("fileName", "")
+            val total = root.optInt("totalPages", 0)
             val currentP = root.optInt("currentPage", 1)
+            val pdfFilePath = root.optString("pdfFilePath", "")
+
+            // The annotated document itself must still exist on disk. If it was
+            // removed (e.g. storage cleared) there is nothing meaningful to
+            // restore — annotations without their source PDF are useless — so we
+            // deliberately do NOT fall back to any bundled/dummy document here.
+            if (pdfFilePath.isEmpty()) return@withContext false
+            val pdfFile = File(pdfFilePath)
+            if (!pdfFile.exists()) return@withContext false
 
             val classesList = mutableListOf<LabelClass>()
             val classesArr = root.optJSONArray("classes")
@@ -703,17 +767,12 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
 
-            // Also reload the sample document
-            val sampleFile = File(context.cacheDir, "sample_invoice_document.pdf")
-            if (!sampleFile.exists()) {
-                pdfManager.loadSamplePdf()
-            } else {
-                pdfManager.openPdfFile(sampleFile)
-            }
+            pdfManager.openPdfFile(pdfFile)
+            if (pdfManager.pageCount <= 0) return@withContext false
 
             _uiState.update {
                 it.copy(
-                    pdfFileName = fileName,
+                    pdfFileName = fileName.ifEmpty { pdfFile.nameWithoutExtension },
                     totalPages = pdfManager.pageCount.coerceAtLeast(total),
                     currentPage = currentP.coerceIn(1, pdfManager.pageCount),
                     classes = if (classesList.isNotEmpty()) classesList else LabelPresets.GENERAL,
@@ -731,6 +790,12 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         super.onCleared()
+        // Best-effort final save — not launched on viewModelScope since that scope
+        // is already being torn down at this point.
+        try { writeSessionToDisk() } catch (_: Exception) {}
         pdfManager.close()
+        _uiState.value.currentPageBitmap?.let {
+            if (!it.isRecycled) it.recycle()
+        }
     }
 }
