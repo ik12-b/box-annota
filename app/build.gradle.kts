@@ -20,6 +20,14 @@ android {
     versionCode = 1
     versionName = "1.0"
 
+    // onnxruntime-android bundles native .so libraries for 4 CPU architectures
+    // by default (~15-25MB each), which is what balloons the APK. x86/x86_64 are
+    // only used by emulators, never by a real phone, so dropping them roughly
+    // halves that payload with zero effect on real-device installs.
+    ndk {
+      abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+    }
+
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 

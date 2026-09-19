@@ -20,8 +20,8 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
@@ -29,16 +29,24 @@ import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.FirstPage
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.LastPage
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.FilterCenterFocus
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,9 +54,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import java.util.Locale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.util.Locale
 import com.example.ui.theme.Amber400
 import com.example.ui.theme.Emerald400
 import com.example.ui.theme.Indigo400
@@ -58,6 +66,15 @@ import com.example.ui.theme.Slate700
 import com.example.ui.theme.Slate800
 import com.example.ui.theme.Slate900
 
+/**
+ * The full action set used to fit in a single 22-button horizontally-scrollable
+ * row, which was fine on a wide/landscape screen but on a narrow portrait phone
+ * meant scrolling through most of it to reach anything past Undo/Redo — the
+ * opposite of compact. Only the actions used on essentially every box (page
+ * nav, Lanjut, Deteksi, Selesai, Undo/Redo, Hapus) stay in the always-visible
+ * row now; everything else (copy/paste/duplicate, fine rotation, zoom,
+ * guide/snap, jump-to-first/last) moved into the "Lainnya" (More) menu.
+ */
 @Composable
 fun BottomActionControls(
     currentPage: Int,
@@ -96,6 +113,7 @@ fun BottomActionControls(
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    var showMoreMenu by remember { mutableStateOf(false) }
 
     Row(
         modifier = modifier
@@ -164,15 +182,19 @@ fun BottomActionControls(
             tag = "bottom_autodetect_btn"
         )
 
-        // Hand off to Transcription mode — crops every box into a line image
+        // Crops every box into a line image and saves it for Transcription
+        // mode — does NOT switch mode. Mode switching only ever happens via
+        // the dedicated toggle in the top toolbar.
         QuickActionButton(
             icon = Icons.Default.Translate,
-            label = "Selesai",
+            label = "Simpan",
             tint = Emerald400,
             enabled = hasAnyBoxes,
             onClick = onFinishLabeling,
             tag = "bottom_finish_labeling_btn"
         )
+
+        DividerBar()
 
         // Undo & Redo
         QuickActionButton(
@@ -190,29 +212,7 @@ fun BottomActionControls(
             tag = "bottom_redo_btn"
         )
 
-        DividerBar()
-
-        // Box actions: Copy, Paste, Duplicate, Delete
-        QuickActionButton(
-            icon = Icons.Default.ContentCopy,
-            label = "Salin",
-            enabled = hasSelectedBox,
-            onClick = onCopy,
-            tag = "bottom_copy_btn"
-        )
-        QuickActionButton(
-            icon = Icons.Default.ContentPaste,
-            label = "Tempel",
-            onClick = onPaste,
-            tag = "bottom_paste_btn"
-        )
-        QuickActionButton(
-            icon = Icons.Default.DynamicFeed,
-            label = "Duplikat",
-            enabled = hasSelectedBox,
-            onClick = onDuplicate,
-            tag = "bottom_duplicate_btn"
-        )
+        // Delete stays inline (frequent, destructive — worth keeping one tap away)
         QuickActionButton(
             icon = Icons.Default.Delete,
             label = "Hapus",
@@ -224,101 +224,159 @@ fun BottomActionControls(
 
         DividerBar()
 
-        // Fine Rotation Controls (Micro-steppers & Panel toggle)
-        QuickActionButton(
-            icon = Icons.Default.RotateLeft,
-            label = "-0.5°",
-            tint = Amber400,
-            onClick = { onRotateFine(-0.5f) },
-            tag = "bottom_rotate_minus_step_btn"
-        )
+        // Everything below is used far less often per-box than the actions
+        // above, so it lives behind "Lainnya" instead of eating scroll space.
+        Box {
+            QuickActionButton(
+                icon = Icons.Default.MoreVert,
+                label = "Lainnya",
+                onClick = { showMoreMenu = true },
+                tag = "bottom_more_btn"
+            )
 
-        val angleLabel = if (kotlin.math.abs(currentRotation) < 0.05f) "0.0°"
-            else if (currentRotation > 0f) "+${String.format(Locale.US, "%.1f", currentRotation)}°"
-            else "${String.format(Locale.US, "%.1f", currentRotation)}°"
+            DropdownMenu(
+                expanded = showMoreMenu,
+                onDismissRequest = { showMoreMenu = false },
+                modifier = Modifier.background(Slate900)
+            ) {
+                Text(
+                    text = "BOX",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                DropdownMenuItem(
+                    text = { Text("Salin", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Slate400) },
+                    enabled = hasSelectedBox,
+                    onClick = { onCopy(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_copy_btn")
+                )
+                DropdownMenuItem(
+                    text = { Text("Tempel", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.ContentPaste, contentDescription = null, tint = Slate400) },
+                    onClick = { onPaste(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_paste_btn")
+                )
+                DropdownMenuItem(
+                    text = { Text("Duplikat", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.DynamicFeed, contentDescription = null, tint = Slate400) },
+                    enabled = hasSelectedBox,
+                    onClick = { onDuplicate(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_duplicate_btn")
+                )
 
-        QuickActionButton(
-            icon = Icons.Default.Tune,
-            label = angleLabel,
-            tint = if (kotlin.math.abs(currentRotation) < 0.05f) Slate400 else Amber400,
-            onClick = onToggleRotatePanel,
-            tag = "bottom_rotate_panel_toggle_btn"
-        )
+                HorizontalDivider(color = Slate800)
+                Text(
+                    text = "ROTASI HALUS",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                // Kept as a single row of taps (menu stays open) since fine
+                // rotation is naturally a repeated-tap adjustment.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    QuickActionButton(
+                        icon = Icons.Default.RotateLeft,
+                        label = "-0.5°",
+                        tint = Amber400,
+                        onClick = { onRotateFine(-0.5f) },
+                        tag = "bottom_rotate_minus_step_btn"
+                    )
+                    val angleLabel = if (kotlin.math.abs(currentRotation) < 0.05f) "0.0°"
+                        else if (currentRotation > 0f) "+${String.format(Locale.US, "%.1f", currentRotation)}°"
+                        else "${String.format(Locale.US, "%.1f", currentRotation)}°"
+                    QuickActionButton(
+                        icon = Icons.Default.Tune,
+                        label = angleLabel,
+                        tint = if (kotlin.math.abs(currentRotation) < 0.05f) Slate400 else Amber400,
+                        onClick = { onToggleRotatePanel(); showMoreMenu = false },
+                        tag = "bottom_rotate_panel_toggle_btn"
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.RotateRight,
+                        label = "+0.5°",
+                        tint = Amber400,
+                        onClick = { onRotateFine(0.5f) },
+                        tag = "bottom_rotate_plus_step_btn"
+                    )
+                }
 
-        QuickActionButton(
-            icon = Icons.Default.RotateRight,
-            label = "+0.5°",
-            tint = Amber400,
-            onClick = { onRotateFine(0.5f) },
-            tag = "bottom_rotate_plus_step_btn"
-        )
+                HorizontalDivider(color = Slate800)
+                Text(
+                    text = "TAMPILAN",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    QuickActionButton(
+                        icon = Icons.Default.Remove,
+                        label = "Zoom-",
+                        onClick = onZoomOut,
+                        tag = "bottom_zoom_out_btn"
+                    )
+                    Text(
+                        text = "${(zoomScale * 100).toInt()}%",
+                        color = Slate400,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(horizontal = 2.dp)
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Add,
+                        label = "Zoom+",
+                        onClick = onZoomIn,
+                        tag = "bottom_zoom_in_btn"
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Fullscreen,
+                        label = "Fit",
+                        onClick = onZoomFit,
+                        tag = "bottom_zoom_fit_btn"
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(if (isCrosshairEnabled) "Guide: Aktif" else "Guide: Nonaktif", color = if (isCrosshairEnabled) Indigo400 else Slate400) },
+                    leadingIcon = { Icon(Icons.Outlined.FilterCenterFocus, contentDescription = null, tint = if (isCrosshairEnabled) Indigo400 else Slate400) },
+                    onClick = onToggleCrosshair,
+                    modifier = Modifier.testTag("bottom_crosshair_btn")
+                )
+                DropdownMenuItem(
+                    text = { Text(if (isSnappingEnabled) "Snap: Aktif" else "Snap: Nonaktif", color = if (isSnappingEnabled) Indigo400 else Slate400) },
+                    leadingIcon = { Icon(Icons.Default.CenterFocusStrong, contentDescription = null, tint = if (isSnappingEnabled) Indigo400 else Slate400) },
+                    onClick = onToggleSnapping,
+                    modifier = Modifier.testTag("bottom_snap_btn")
+                )
 
-        DividerBar()
-
-        // Zoom Controls
-        QuickActionButton(
-            icon = Icons.Default.Remove,
-            label = "Zoom-",
-            onClick = onZoomOut,
-            tag = "bottom_zoom_out_btn"
-        )
-        Text(
-            text = "${(zoomScale * 100).toInt()}%",
-            color = Slate400,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        )
-        QuickActionButton(
-            icon = Icons.Default.Add,
-            label = "Zoom+",
-            onClick = onZoomIn,
-            tag = "bottom_zoom_in_btn"
-        )
-        QuickActionButton(
-            icon = Icons.Default.Fullscreen,
-            label = "Fit",
-            onClick = onZoomFit,
-            tag = "bottom_zoom_fit_btn"
-        )
-
-        DividerBar()
-
-        // Crosshair alignment guide
-        QuickActionButton(
-            icon = Icons.Outlined.FilterCenterFocus,
-            label = "Guide",
-            tint = if (isCrosshairEnabled) Indigo400 else Slate400,
-            onClick = onToggleCrosshair,
-            tag = "bottom_crosshair_btn"
-        )
-
-        // Snapping toggle
-        QuickActionButton(
-            icon = Icons.Default.CenterFocusStrong,
-            label = "Snap",
-            tint = if (isSnappingEnabled) Indigo400 else Slate400,
-            onClick = onToggleSnapping,
-            tag = "bottom_snap_btn"
-        )
-
-        DividerBar()
-
-        // First & Last Page
-        QuickActionButton(
-            icon = Icons.Default.FirstPage,
-            label = "Awal",
-            enabled = currentPage > 1,
-            onClick = onFirstPage,
-            tag = "bottom_first_page_btn"
-        )
-        QuickActionButton(
-            icon = Icons.Default.LastPage,
-            label = "Akhir",
-            enabled = currentPage < totalPages,
-            onClick = onLastPage,
-            tag = "bottom_last_page_btn"
-        )
+                HorizontalDivider(color = Slate800)
+                DropdownMenuItem(
+                    text = { Text("Halaman Awal", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.FirstPage, contentDescription = null, tint = Slate400) },
+                    enabled = currentPage > 1,
+                    onClick = { onFirstPage(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_first_page_btn")
+                )
+                DropdownMenuItem(
+                    text = { Text("Halaman Akhir", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.LastPage, contentDescription = null, tint = Slate400) },
+                    enabled = currentPage < totalPages,
+                    onClick = { onLastPage(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_last_page_btn")
+                )
+            }
+        }
     }
 }
 

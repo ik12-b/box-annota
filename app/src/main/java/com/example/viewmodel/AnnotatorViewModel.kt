@@ -839,16 +839,22 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 _uiState.update {
                     it.copy(
                         transcriptionLines = lines,
-                        currentTranscriptionIndex = 0,
-                        appMode = AppMode.TRANSCRIPTION
+                        currentTranscriptionIndex = it.currentTranscriptionIndex.coerceIn(0, lines.size - 1)
                     )
                 }
-                showToast("${lines.size} potongan baris siap ditranskripsi.")
+                showToast("${lines.size} potongan baris disimpan. Tekan ikon Transkripsi di toolbar untuk melihatnya.")
                 saveSession()
             } catch (e: Exception) {
-                showToast("Gagal menyiapkan mode transkripsi: ${e.message}")
+                showToast("Gagal menyimpan potongan transkripsi: ${e.message}")
             } finally {
                 _uiState.update { it.copy(isPreparingTranscription = false) }
+                // We stay in Labeling mode now (mode switching is only ever
+                // triggered by the toolbar toggle), so make sure the page
+                // being displayed isn't left stale from the renderJob we
+                // cancelled above if the user was mid-navigation.
+                if (_uiState.value.hasDocument) {
+                    renderJob = viewModelScope.launch(safetyNetHandler) { renderCurrentPage() }
+                }
             }
         }
     }
@@ -859,6 +865,21 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             renderJob?.cancel()
             renderJob = viewModelScope.launch(safetyNetHandler) { renderCurrentPage() }
         }
+    }
+
+    /**
+     * Quick mode switch: jumps straight into Transcription mode using whatever
+     * line crops already exist from the last "Selesai" — unlike
+     * finishLabelingAndStartTranscription(), this never re-crops anything, so
+     * it's instant. Used by the toolbar's mode-switch button as the return path
+     * from Labeling once Transcription has already been entered at least once.
+     */
+    fun switchToTranscriptionMode() {
+        if (_uiState.value.transcriptionLines.isEmpty()) {
+            showToast("Belum ada baris transkripsi. Tekan \"Selesai\" dulu di mode Labeling.")
+            return
+        }
+        _uiState.update { it.copy(appMode = AppMode.TRANSCRIPTION) }
     }
 
     fun goToTranscriptionLine(index: Int) {

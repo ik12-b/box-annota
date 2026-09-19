@@ -157,6 +157,8 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                     showRightDrawer = !showRightDrawer
                     if (showRightDrawer) showLeftDrawer = false
                 },
+                hasTranscriptionLines = uiState.transcriptionLines.isNotEmpty(),
+                onSwitchToTranscription = { viewModel.switchToTranscriptionMode() },
                 modifier = Modifier.statusBarsPadding()
             )
         },
