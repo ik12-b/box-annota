@@ -12,8 +12,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,7 +94,7 @@ fun TranscriptionModeScreen(
     Scaffold(
         modifier = modifier.background(Slate950),
         topBar = {
-            Column {
+            Column(modifier = Modifier.statusBarsPadding()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -185,6 +188,7 @@ fun TranscriptionModeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Slate900)
+                    .navigationBarsPadding()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -228,17 +232,20 @@ fun TranscriptionModeScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             if (line == null) {
-                Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Box(modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp), contentAlignment = Alignment.Center) {
                     Text(text = "Tidak ada baris untuk ditranskripsi.", color = Slate400, fontSize = 13.sp)
                 }
                 return@Column
             }
 
-            // Cropped line image preview
+            // Cropped line image preview. Bounded (not weight(1f)/fillMaxSize)
+            // so a small or thin crop doesn't get stranded in a huge box full
+            // of dead space — the box sizes to a sensible range and the rest
+            // of the screen stays compact around it instead.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .heightIn(min = 100.dp, max = 280.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color.White)
                     .padding(4.dp),
@@ -311,6 +318,8 @@ fun TranscriptionModeScreen(
                 ),
                 modifier = Modifier.fillMaxWidth().testTag("transcription_text_input")
             )
+
+            Spacer(modifier = Modifier.weight(1f))
         }
     }
 }

@@ -777,6 +777,61 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /** Crops every annotated box on every page into its own image and enters Transcription mode. */
+    /**
+     * Crops the pixel content that falls inside [box]'s own rotated rectangle
+     * out of [pageBitmap] and straightens it into an upright image sized to the
+     * box's own (unrotated) width/height. The page bitmap itself is never
+     * rotated — only the box outline is (see AnnotationCanvasView) — so a
+     * rotated box (drawn to tightly wrap vertical/skewed text) needs this
+     * matrix-based sampling instead of a plain axis-aligned sub-bitmap, or the
+     * crop ends up being whatever axis-aligned rectangle the box's stored
+     * x/y/width/height cover — mostly blank background, with the actual
+     * (rotated) text sliced out or barely visible at an angle.
+     */
+    private fun cropBoxFromPage(pageBitmap: Bitmap, box: AnnotationBox): Bitmap? {
+        val pxX = box.x * pageBitmap.width
+        val pxY = box.y * pageBitmap.height
+        val pxW = box.width * pageBitmap.width
+        val pxH = box.height * pageBitmap.height
+        val outW = pxW.toInt().coerceAtLeast(1)
+        val outH = pxH.toInt().coerceAtLeast(1)
+
+        return try {
+            if (kotlin.math.abs(box.rotation) < 0.05f) {
+                // Fast path: no rotation, a plain axis-aligned sub-bitmap is exact.
+                val left = pxX.toInt().coerceIn(0, pageBitmap.width - 1)
+                val top = pxY.toInt().coerceIn(0, pageBitmap.height - 1)
+                val w = outW.coerceAtMost(pageBitmap.width - left)
+                val h = outH.coerceAtMost(pageBitmap.height - top)
+                if (w <= 1 || h <= 1) null else Bitmap.createBitmap(pageBitmap, left, top, w, h)
+            } else {
+                // Sample the page through the box's rotated rectangle (same
+                // pivot/angle AnnotationCanvasView draws the outline with) and
+                // un-rotate the result so vertical/skewed text comes out
+                // upright and easy to read for transcription.
+                val pivotX = pxX + pxW / 2f
+                val pivotY = pxY + pxH / 2f
+                val matrix = android.graphics.Matrix().apply {
+                    postTranslate(-pivotX, -pivotY)
+                    postRotate(-box.rotation)
+                    postTranslate(outW / 2f, outH / 2f)
+                }
+                val result = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(result)
+                canvas.drawColor(android.graphics.Color.WHITE)
+                val paint = android.graphics.Paint(
+                    android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG
+                )
+                canvas.drawBitmap(pageBitmap, matrix, paint)
+                result
+            }
+        } catch (_: OutOfMemoryError) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun finishLabelingAndStartTranscription() {
         val state = _uiState.value
         if (!state.hasDocument || state.isPreparingTranscription) return
@@ -805,17 +860,9 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     try {
                         val boxes = snapshot.pageAnnotations[pageNum] ?: emptyList()
                         for (box in boxes) {
-                            val left = (box.x * pageBitmap.width).toInt().coerceIn(0, pageBitmap.width - 1)
-                            val top = (box.y * pageBitmap.height).toInt().coerceIn(0, pageBitmap.height - 1)
-                            val w = (box.width * pageBitmap.width).toInt()
-                                .coerceAtLeast(1).coerceAtMost(pageBitmap.width - left)
-                            val h = (box.height * pageBitmap.height).toInt()
-                                .coerceAtLeast(1).coerceAtMost(pageBitmap.height - top)
-                            if (w <= 1 || h <= 1) continue
-
                             val cropFile = File(cropsDir, "${box.id}.jpg")
                             try {
-                                val cropBitmap = Bitmap.createBitmap(pageBitmap, left, top, w, h)
+                                val cropBitmap = cropBoxFromPage(pageBitmap, box) ?: continue
                                 java.io.FileOutputStream(cropFile).use { out ->
                                     cropBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
                                 }
