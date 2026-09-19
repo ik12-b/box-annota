@@ -75,6 +75,27 @@ enum class ExportFormat(val displayName: String, val extension: String) {
     PASCAL_VOC("Pascal VOC", ".xml")
 }
 
+/** Which top-level workflow the app is currently showing. */
+enum class AppMode {
+    LABELING,
+    TRANSCRIPTION
+}
+
+/**
+ * One cropped line image waiting to be transcribed. Created from a bounding box
+ * once labeling is marked "Selesai" — [sourceBoxId] ties it back to the
+ * [AnnotationBox] it was cropped from so re-running the crop step can preserve
+ * any text already typed.
+ */
+data class TranscriptionLine(
+    val id: String,
+    val sourceBoxId: String,
+    val pageNumber: Int,
+    val classId: Int,
+    val cropFilePath: String,
+    val text: String = ""
+)
+
 enum class TouchHandle {
     NONE,
     TOP_LEFT,

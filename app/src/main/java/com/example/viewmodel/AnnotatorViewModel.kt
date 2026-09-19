@@ -1,16 +1,23 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.api.GeminiResult
+import com.example.api.GeminiTranscriptionService
+import com.example.ml.TextLineDetector
 import com.example.model.AnnotationBox
+import com.example.model.AppMode
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
 import com.example.model.LabelPresets
+import com.example.model.TranscriptionLine
 import com.example.pdf.PdfManager
 import com.example.util.DatasetExporter
+import com.example.util.TranscriptionExporter
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -54,7 +62,19 @@ data class AnnotatorUiState(
     val showAddClassDialog: Boolean = false,
     val showPresetDialog: Boolean = false,
     val showExportDialog: Boolean = false,
-    val showProjectSessionDialog: Boolean = false
+    val showProjectSessionDialog: Boolean = false,
+    val isDetectingBoxes: Boolean = false,
+    val appMode: AppMode = AppMode.LABELING,
+    val isPreparingTranscription: Boolean = false,
+    val transcriptionLines: List<TranscriptionLine> = emptyList(),
+    val currentTranscriptionIndex: Int = 0,
+    val showTranscriptionExportDialog: Boolean = false,
+    val geminiApiKey: String = "",
+    val geminiModel: String = GeminiTranscriptionService.DEFAULT_MODEL,
+    val showGeminiSettingsDialog: Boolean = false,
+    val isAutoTranscribing: Boolean = false,
+    val autoTranscribeCurrent: Int = 0,
+    val autoTranscribeTotal: Int = 0
 ) {
     val currentBoxes: List<AnnotationBox>
         get() = pageAnnotations[currentPage] ?: emptyList()
@@ -71,13 +91,26 @@ data class AnnotatorUiState(
     /** No document loaded yet — distinct from "loading a page of a loaded document". */
     val hasDocument: Boolean
         get() = totalPages > 0
+
+    val currentTranscriptionLine: TranscriptionLine?
+        get() = transcriptionLines.getOrNull(currentTranscriptionIndex)
+
+    val transcriptionFilledCount: Int
+        get() = transcriptionLines.count { it.text.isNotBlank() }
 }
 
 class AnnotatorViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private const val PREF_GEMINI_API_KEY = "gemini_api_key"
+        private const val PREF_GEMINI_MODEL = "gemini_model"
+    }
+
     private val context = application.applicationContext
     val pdfManager = PdfManager(context)
     private val datasetExporter = DatasetExporter(context)
+    private val transcriptionExporter = TranscriptionExporter(context)
+    private val textLineDetector = TextLineDetector(context)
 
     // Any unexpected exception inside a fire-and-forget launch (render / autosave)
     // is swallowed here instead of propagating and force-closing the app.
@@ -101,7 +134,21 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private val sessionFile: File
         get() = File(context.filesDir, "annotator_session.json")
 
+    private val geminiPrefs = context.getSharedPreferences("gemini_settings", Context.MODE_PRIVATE)
+    private val geminiService = GeminiTranscriptionService()
+    private var autoTranscribeBatchJob: Job? = null
+
     init {
+        // SharedPreferences reads are fast/local — safe to do synchronously here.
+        val savedKey = try { geminiPrefs.getString(PREF_GEMINI_API_KEY, "") ?: "" } catch (_: Exception) { "" }
+        val savedModel = try {
+            geminiPrefs.getString(PREF_GEMINI_MODEL, GeminiTranscriptionService.DEFAULT_MODEL)
+                ?: GeminiTranscriptionService.DEFAULT_MODEL
+        } catch (_: Exception) {
+            GeminiTranscriptionService.DEFAULT_MODEL
+        }
+        _uiState.update { it.copy(geminiApiKey = savedKey, geminiModel = savedModel) }
+
         viewModelScope.launch(safetyNetHandler) {
             tryRestoreSession()
             _uiState.update { it.copy(isRestoringSession = false) }
@@ -110,6 +157,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun openPdfFromUri(uri: Uri) {
         renderJob?.cancel()
+        autoTranscribeBatchJob?.cancel()
         viewModelScope.launch(safetyNetHandler) {
             _uiState.update { it.copy(isLoadingPage = true) }
             try {
@@ -127,9 +175,13 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                         selectedBoxIds = emptySet(),
                         primarySelectedBoxId = null,
                         canUndo = false,
-                        canRedo = false
+                        canRedo = false,
+                        transcriptionLines = emptyList(),
+                        currentTranscriptionIndex = 0,
+                        appMode = AppMode.LABELING
                     )
                 }
+                clearOldCrops()
                 renderCurrentPage()
                 showToast("PDF berhasil dibuka (${total} Halaman).")
                 saveSession()
@@ -336,6 +388,82 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         saveSession()
     }
 
+    /**
+     * Runs the on-device ONNX text-line detector over the current page and adds
+     * a box for each detected line, so labeling can start from a pre-filled set
+     * of boxes instead of drawing every one by hand. Boxes that heavily overlap
+     * an existing box are skipped so re-running detection doesn't pile up
+     * duplicates. Never throws — on any failure it just detects nothing.
+     */
+    fun autoDetectBoxes() {
+        val state = _uiState.value
+        if (!state.hasDocument || state.isDetectingBoxes || state.currentPageBitmap == null) return
+        val bitmap = state.currentPageBitmap
+        val pageNum = state.currentPage
+
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isDetectingBoxes = true) }
+            // Detection runs on a background dispatcher and can take a while;
+            // work off a private copy so a page switch mid-inference (which
+            // recycles the old page bitmap) can never race with the detector
+            // still reading pixels from it.
+            var detectorInput: Bitmap? = null
+            try {
+                detectorInput = try {
+                    bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                } catch (_: Exception) {
+                    null
+                }
+                if (detectorInput == null) {
+                    showToast("Deteksi otomatis gagal (memori tidak cukup).")
+                    return@launch
+                }
+
+                val detectedRects = textLineDetector.detect(detectorInput)
+                if (detectedRects.isEmpty()) {
+                    showToast("Tidak ada baris teks yang terdeteksi otomatis di halaman ini.")
+                    return@launch
+                }
+
+                val existingBoxes = _uiState.value.pageAnnotations[pageNum] ?: emptyList()
+                val newBoxes = detectedRects.mapNotNull { rect ->
+                    val candidate = AnnotationBox(
+                        id = java.util.UUID.randomUUID().toString(),
+                        classId = _uiState.value.activeClassId,
+                        x = rect.left,
+                        y = rect.top,
+                        width = rect.width(),
+                        height = rect.height()
+                    )
+                    val overlapsExisting = existingBoxes.any { it.calculateIoU(candidate) > 0.5f }
+                    if (overlapsExisting) null else candidate
+                }
+
+                if (newBoxes.isEmpty()) {
+                    showToast("Semua baris terdeteksi sudah punya box (tidak ada duplikat ditambahkan).")
+                    return@launch
+                }
+
+                saveUndoState()
+                _uiState.update { s ->
+                    val newMap = s.pageAnnotations.toMutableMap()
+                    newMap[pageNum] = (s.pageAnnotations[pageNum] ?: emptyList()) + newBoxes
+                    s.copy(pageAnnotations = newMap)
+                }
+                checkOverlap()
+                showToast("${newBoxes.size} box terdeteksi otomatis ditambahkan.")
+                saveSession()
+            } catch (_: Exception) {
+                showToast("Deteksi otomatis gagal. Silakan gambar box secara manual.")
+            } finally {
+                _uiState.update { it.copy(isDetectingBoxes = false) }
+                try {
+                    if (detectorInput != null && !detectorInput.isRecycled) detectorInput.recycle()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     fun updateBox(updatedBox: AnnotationBox) {
         val page = _uiState.value.currentPage
         val existing = (_uiState.value.pageAnnotations[page] ?: emptyList()).toMutableList()
@@ -529,7 +657,10 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun showAddClassDialog(show: Boolean) = _uiState.update { it.copy(showAddClassDialog = show) }
     fun showPresetDialog(show: Boolean) = _uiState.update { it.copy(showPresetDialog = show) }
-    fun showExportDialog(show: Boolean) = _uiState.update { it.copy(showExportDialog = show) }
+    fun showExportDialog(show: Boolean) = _uiState.update {
+        if (show) it.copy(showExportDialog = true, exportedZipFile = null, exportStatus = "", exportProgress = 0f)
+        else it.copy(showExportDialog = false)
+    }
     fun showProjectSessionDialog(show: Boolean) = _uiState.update { it.copy(showProjectSessionDialog = show) }
 
     fun startExport(
@@ -597,6 +728,8 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     fun resetProject() {
         undoStacks.clear()
         redoStacks.clear()
+        clearOldCrops()
+        autoTranscribeBatchJob?.cancel()
         _uiState.update {
             it.copy(
                 currentPage = 1,
@@ -605,7 +738,10 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedBoxIds = emptySet(),
                 primarySelectedBoxId = null,
                 canUndo = false,
-                canRedo = false
+                canRedo = false,
+                appMode = AppMode.LABELING,
+                transcriptionLines = emptyList(),
+                currentTranscriptionIndex = 0
             )
         }
         if (_uiState.value.hasDocument) {
@@ -613,6 +749,313 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             renderJob = viewModelScope.launch(safetyNetHandler) { renderCurrentPage() }
         }
         showToast("Proyek direset.")
+        saveSession()
+    }
+
+    // ---------------------------------------------------------------------
+    // Transcription mode: pressing "Selesai" in Labeling mode crops every
+    // annotated box into its own line image and switches over to a
+    // dedicated transcription workflow. Saving/exporting in each mode is
+    // kept completely separate — see startExport() (box dataset) vs
+    // startTranscriptionExport() (line-recognition dataset) below.
+    // ---------------------------------------------------------------------
+
+    private val cropsDir: File
+        get() = File(context.filesDir, "crops").apply { mkdirs() }
+
+    private fun clearOldCrops() {
+        try { cropsDir.listFiles()?.forEach { it.delete() } } catch (_: Exception) {}
+    }
+
+    /** Crops every annotated box on every page into its own image and enters Transcription mode. */
+    fun finishLabelingAndStartTranscription() {
+        val state = _uiState.value
+        if (!state.hasDocument || state.isPreparingTranscription) return
+        if (state.totalBoxesAllPages == 0) {
+            showToast("Belum ada bounding box. Gambar atau deteksi box dulu sebelum transkripsi.")
+            return
+        }
+
+        renderJob?.cancel()
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isPreparingTranscription = true) }
+            try {
+                val snapshot = _uiState.value
+                val existingTextByBoxId = snapshot.transcriptionLines.associateBy { it.sourceBoxId }
+                cropsDir.mkdirs()
+                val lines = mutableListOf<TranscriptionLine>()
+                val pagesWithBoxes = snapshot.pageAnnotations.filterValues { it.isNotEmpty() }.keys.sorted()
+
+                for (pageNum in pagesWithBoxes) {
+                    val pageBitmap = try {
+                        pdfManager.renderPage(pageNum - 1, targetWidthPx = 1600)
+                    } catch (_: Exception) {
+                        null
+                    } ?: continue
+
+                    try {
+                        val boxes = snapshot.pageAnnotations[pageNum] ?: emptyList()
+                        for (box in boxes) {
+                            val left = (box.x * pageBitmap.width).toInt().coerceIn(0, pageBitmap.width - 1)
+                            val top = (box.y * pageBitmap.height).toInt().coerceIn(0, pageBitmap.height - 1)
+                            val w = (box.width * pageBitmap.width).toInt()
+                                .coerceAtLeast(1).coerceAtMost(pageBitmap.width - left)
+                            val h = (box.height * pageBitmap.height).toInt()
+                                .coerceAtLeast(1).coerceAtMost(pageBitmap.height - top)
+                            if (w <= 1 || h <= 1) continue
+
+                            val cropFile = File(cropsDir, "${box.id}.jpg")
+                            try {
+                                val cropBitmap = Bitmap.createBitmap(pageBitmap, left, top, w, h)
+                                java.io.FileOutputStream(cropFile).use { out ->
+                                    cropBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                                }
+                                if (!cropBitmap.isRecycled) cropBitmap.recycle()
+                            } catch (_: Exception) {
+                                continue
+                            }
+
+                            lines.add(
+                                TranscriptionLine(
+                                    id = box.id,
+                                    sourceBoxId = box.id,
+                                    pageNumber = pageNum,
+                                    classId = box.classId,
+                                    cropFilePath = cropFile.absolutePath,
+                                    text = existingTextByBoxId[box.id]?.text ?: ""
+                                )
+                            )
+                        }
+                    } finally {
+                        if (!pageBitmap.isRecycled) pageBitmap.recycle()
+                    }
+                }
+
+                if (lines.isEmpty()) {
+                    showToast("Gagal memotong gambar dari box yang ada.")
+                    return@launch
+                }
+
+                _uiState.update {
+                    it.copy(
+                        transcriptionLines = lines,
+                        currentTranscriptionIndex = 0,
+                        appMode = AppMode.TRANSCRIPTION
+                    )
+                }
+                showToast("${lines.size} potongan baris siap ditranskripsi.")
+                saveSession()
+            } catch (e: Exception) {
+                showToast("Gagal menyiapkan mode transkripsi: ${e.message}")
+            } finally {
+                _uiState.update { it.copy(isPreparingTranscription = false) }
+            }
+        }
+    }
+
+    fun switchToLabelingMode() {
+        _uiState.update { it.copy(appMode = AppMode.LABELING) }
+        if (_uiState.value.hasDocument) {
+            renderJob?.cancel()
+            renderJob = viewModelScope.launch(safetyNetHandler) { renderCurrentPage() }
+        }
+    }
+
+    fun goToTranscriptionLine(index: Int) {
+        val lines = _uiState.value.transcriptionLines
+        if (index in lines.indices) {
+            _uiState.update { it.copy(currentTranscriptionIndex = index) }
+        }
+    }
+
+    fun nextTranscriptionLine() = goToTranscriptionLine(_uiState.value.currentTranscriptionIndex + 1)
+    fun prevTranscriptionLine() = goToTranscriptionLine(_uiState.value.currentTranscriptionIndex - 1)
+
+    fun updateTranscriptionText(text: String) {
+        val idx = _uiState.value.currentTranscriptionIndex
+        _uiState.update { state ->
+            val lines = state.transcriptionLines.toMutableList()
+            if (idx in lines.indices) {
+                lines[idx] = lines[idx].copy(text = text)
+            }
+            state.copy(transcriptionLines = lines)
+        }
+        saveSession()
+    }
+
+    fun showTranscriptionExportDialog(show: Boolean) = _uiState.update {
+        if (show) it.copy(showTranscriptionExportDialog = true, exportedZipFile = null, exportStatus = "", exportProgress = 0f)
+        else it.copy(showTranscriptionExportDialog = false)
+    }
+
+    /** Exports the transcription-mode work as its own line-recognition dataset — never mixed with the box dataset export. */
+    fun startTranscriptionExport(onlyFilled: Boolean) {
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update {
+                it.copy(
+                    isExporting = true,
+                    exportProgress = 0f,
+                    exportStatus = "Menyiapkan ekspor transkripsi...",
+                    exportedZipFile = null
+                )
+            }
+            try {
+                val state = _uiState.value
+                val file = transcriptionExporter.exportDataset(
+                    baseFileName = state.pdfFileName.ifEmpty { "transkripsi" },
+                    lines = state.transcriptionLines,
+                    classes = state.classes,
+                    onlyFilled = onlyFilled,
+                    onProgress = { p, status ->
+                        _uiState.update { it.copy(exportProgress = p, exportStatus = status) }
+                    }
+                )
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        exportedZipFile = file,
+                        exportStatus = "Selesai! ZIP tersimpan di: ${file.name}"
+                    )
+                }
+                showToast("Dataset transkripsi berhasil diekspor!")
+            } catch (e: Exception) {
+                _uiState.update { it.copy(isExporting = false, exportStatus = "Gagal: ${e.message}") }
+                showToast("Gagal ekspor transkripsi: ${e.message}")
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Gemini API: automatic transcription. Talks directly to Google's Gemini
+    // API using a key the user supplies and stores locally (plain
+    // SharedPreferences — not encrypted at rest) via saveGeminiSettings().
+    // Never blocks the rest of the app: single-line calls and the batch loop
+    // both run as ordinary cancellable coroutines, and every failure surfaces
+    // as a toast rather than a crash.
+    // ---------------------------------------------------------------------
+
+    fun showGeminiSettingsDialog(show: Boolean) = _uiState.update { it.copy(showGeminiSettingsDialog = show) }
+
+    fun saveGeminiSettings(apiKey: String, modelName: String) {
+        val trimmedKey = apiKey.trim()
+        val trimmedModel = modelName.trim().ifEmpty { GeminiTranscriptionService.DEFAULT_MODEL }
+        try {
+            geminiPrefs.edit()
+                .putString(PREF_GEMINI_API_KEY, trimmedKey)
+                .putString(PREF_GEMINI_MODEL, trimmedModel)
+                .apply()
+        } catch (_: Exception) {
+            // Persisting the setting failed (very unlikely for local prefs) — the
+            // in-memory value below still applies for the rest of this session.
+        }
+        _uiState.update {
+            it.copy(geminiApiKey = trimmedKey, geminiModel = trimmedModel, showGeminiSettingsDialog = false)
+        }
+        showToast("Pengaturan Gemini disimpan.")
+    }
+
+    /** Auto-transcribes just the currently displayed line, overwriting its text field. */
+    fun autoTranscribeCurrentLine() {
+        val state = _uiState.value
+        val line = state.currentTranscriptionLine ?: return
+        if (state.isAutoTranscribing) return
+        if (state.geminiApiKey.isBlank()) {
+            showToast("Isi API key Gemini dulu di pengaturan.")
+            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+            return
+        }
+
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isAutoTranscribing = true, autoTranscribeCurrent = 1, autoTranscribeTotal = 1) }
+            try {
+                val result = geminiService.transcribeImage(
+                    File(line.cropFilePath),
+                    _uiState.value.geminiApiKey,
+                    _uiState.value.geminiModel
+                )
+                when (result) {
+                    is GeminiResult.Success -> {
+                        applyTranscribedText(line.id, result.text)
+                        showToast("Transkripsi otomatis selesai.")
+                    }
+                    is GeminiResult.Failure -> showToast(result.message)
+                }
+            } finally {
+                _uiState.update { it.copy(isAutoTranscribing = false) }
+            }
+        }
+    }
+
+    /** Batch-transcribes every line that doesn't have text yet, one request at a time. */
+    fun autoTranscribeAllRemaining() {
+        val state = _uiState.value
+        if (state.isAutoTranscribing) return
+        if (state.geminiApiKey.isBlank()) {
+            showToast("Isi API key Gemini dulu di pengaturan.")
+            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+            return
+        }
+
+        val targets = state.transcriptionLines.filter { it.text.isBlank() }
+        if (targets.isEmpty()) {
+            showToast("Semua baris sudah memiliki teks.")
+            return
+        }
+
+        autoTranscribeBatchJob = viewModelScope.launch(safetyNetHandler) {
+            _uiState.update {
+                it.copy(isAutoTranscribing = true, autoTranscribeCurrent = 0, autoTranscribeTotal = targets.size)
+            }
+            var consecutiveFailures = 0
+            try {
+                for ((index, target) in targets.withIndex()) {
+                    if (!isActive) break
+                    _uiState.update { it.copy(autoTranscribeCurrent = index + 1) }
+
+                    val result = geminiService.transcribeImage(
+                        File(target.cropFilePath),
+                        _uiState.value.geminiApiKey,
+                        _uiState.value.geminiModel
+                    )
+                    when (result) {
+                        is GeminiResult.Success -> {
+                            applyTranscribedText(target.id, result.text)
+                            consecutiveFailures = 0
+                        }
+                        is GeminiResult.Failure -> {
+                            consecutiveFailures++
+                            // Stop early on repeated failures (bad key, no network,
+                            // rate limit) instead of burning through the whole batch
+                            // failing the exact same way every single time.
+                            if (consecutiveFailures >= 3) {
+                                showToast("Dihentikan: ${result.message}")
+                                break
+                            }
+                        }
+                    }
+                    if (isActive) delay(400) // be polite to the API / rate limits
+                }
+                if (isActive) showToast("Transkripsi otomatis batch selesai.")
+            } finally {
+                _uiState.update { it.copy(isAutoTranscribing = false) }
+            }
+        }
+    }
+
+    fun cancelAutoTranscribeBatch() {
+        autoTranscribeBatchJob?.cancel()
+        _uiState.update { it.copy(isAutoTranscribing = false) }
+        showToast("Transkripsi otomatis dihentikan.")
+    }
+
+    private fun applyTranscribedText(lineId: String, text: String) {
+        val idx = _uiState.value.transcriptionLines.indexOfFirst { it.id == lineId }
+        if (idx == -1) return
+        _uiState.update { s ->
+            val lines = s.transcriptionLines.toMutableList()
+            lines[idx] = lines[idx].copy(text = text)
+            s.copy(transcriptionLines = lines)
+        }
         saveSession()
     }
 
@@ -683,6 +1126,21 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             val rotObj = JSONObject()
             state.pageRotations.forEach { (p, rot) -> rotObj.put(p.toString(), rot.toDouble()) }
             root.put("pageRotations", rotObj)
+
+            root.put("appMode", state.appMode.name)
+            val transcriptionArr = JSONArray()
+            state.transcriptionLines.forEach { line ->
+                transcriptionArr.put(JSONObject().apply {
+                    put("id", line.id)
+                    put("sourceBoxId", line.sourceBoxId)
+                    put("pageNumber", line.pageNumber)
+                    put("classId", line.classId)
+                    put("cropFilePath", line.cropFilePath)
+                    put("text", line.text)
+                })
+            }
+            root.put("transcriptionLines", transcriptionArr)
+            root.put("currentTranscriptionIndex", state.currentTranscriptionIndex)
 
             // Write-to-temp-then-rename so a process death mid-write can never leave
             // a half-written / corrupted session.json behind that fails to parse on
@@ -767,6 +1225,34 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
 
+            // Transcription lines whose crop image no longer exists on disk are
+            // dropped rather than restored broken — the user can just press
+            // "Selesai" again from Labeling mode to re-crop them.
+            val transcriptionLines = mutableListOf<TranscriptionLine>()
+            val transcriptionArr = root.optJSONArray("transcriptionLines")
+            if (transcriptionArr != null) {
+                for (i in 0 until transcriptionArr.length()) {
+                    val o = transcriptionArr.getJSONObject(i)
+                    val cropPath = o.optString("cropFilePath", "")
+                    if (cropPath.isEmpty() || !File(cropPath).exists()) continue
+                    transcriptionLines.add(
+                        TranscriptionLine(
+                            id = o.getString("id"),
+                            sourceBoxId = o.getString("sourceBoxId"),
+                            pageNumber = o.optInt("pageNumber", 1),
+                            classId = o.optInt("classId", 0),
+                            cropFilePath = cropPath,
+                            text = o.optString("text", "")
+                        )
+                    )
+                }
+            }
+            val savedIndex = root.optInt("currentTranscriptionIndex", 0)
+            val restoredMode = when (root.optString("appMode", AppMode.LABELING.name)) {
+                AppMode.TRANSCRIPTION.name -> if (transcriptionLines.isNotEmpty()) AppMode.TRANSCRIPTION else AppMode.LABELING
+                else -> AppMode.LABELING
+            }
+
             pdfManager.openPdfFile(pdfFile)
             if (pdfManager.pageCount <= 0) return@withContext false
 
@@ -778,7 +1264,10 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     classes = if (classesList.isNotEmpty()) classesList else LabelPresets.GENERAL,
                     activeClassId = classesList.firstOrNull()?.id ?: 0,
                     pageAnnotations = pageAnno,
-                    pageRotations = pageRot
+                    pageRotations = pageRot,
+                    transcriptionLines = transcriptionLines,
+                    currentTranscriptionIndex = savedIndex.coerceIn(0, (transcriptionLines.size - 1).coerceAtLeast(0)),
+                    appMode = restoredMode
                 )
             }
             renderCurrentPage()
@@ -794,6 +1283,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         // is already being torn down at this point.
         try { writeSessionToDisk() } catch (_: Exception) {}
         pdfManager.close()
+        textLineDetector.close()
         _uiState.value.currentPageBitmap?.let {
             if (!it.isRecycled) it.recycle()
         }

@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
@@ -55,14 +57,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.FileProvider
+import com.example.api.GeminiTranscriptionService
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
 import com.example.model.LabelPresets
@@ -579,6 +585,302 @@ fun ExportDatasetDialog(
                         Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (isExporting) "Memproses..." else "Download ZIP")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TranscriptionExportDialog(
+    totalLines: Int,
+    filledLines: Int,
+    isExporting: Boolean,
+    exportProgress: Float,
+    exportStatus: String,
+    exportedZipFile: File?,
+    onDismiss: () -> Unit,
+    onStartExport: (onlyFilled: Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    var onlyFilled by remember { mutableStateOf(true) }
+
+    Dialog(onDismissRequest = { if (!isExporting) onDismiss() }) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Slate900,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth().testTag("export_transcription_dialog")
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Upload, contentDescription = null, tint = Indigo400)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Export Dataset Transkripsi",
+                            color = Slate100,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (!isExporting) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Tutup", tint = Slate400)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "Berisi potongan gambar per baris + labels.txt (format PaddleOCR: gambar<TAB>teks). Dataset ini terpisah dari dataset bounding box.",
+                    color = Slate400,
+                    fontSize = 11.sp
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Slate950)
+                        .border(1.dp, Slate800, RoundedCornerShape(8.dp))
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = "$totalLines baris total · $filledLines sudah diisi teks",
+                        color = Slate100,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = onlyFilled,
+                        onCheckedChange = { onlyFilled = it },
+                        colors = CheckboxDefaults.colors(checkedColor = Indigo500)
+                    )
+                    Text(text = "Hanya baris yang sudah diisi teksnya", color = Slate100, fontSize = 11.sp)
+                }
+
+                if (isExporting) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = exportStatus, color = Slate400, fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { exportProgress },
+                        color = Indigo500,
+                        trackColor = Slate800,
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
+                    )
+                }
+
+                if (exportedZipFile != null && !isExporting) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Emerald400.copy(alpha = 0.15f))
+                            .border(1.dp, Emerald400.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Column {
+                            Text(text = "ZIP Berhasil Dibuat!", color = Emerald400, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text(text = exportedZipFile.name, color = Slate100, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Button(
+                                onClick = { shareZipFile(context, exportedZipFile) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Emerald400),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth().height(32.dp)
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, tint = Slate950, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(text = "Bagikan / Simpan File ZIP", color = Slate950, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        enabled = !isExporting,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Tutup")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { onStartExport(onlyFilled) },
+                        enabled = !isExporting,
+                        colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("confirm_export_transcription_btn")
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isExporting) "Memproses..." else "Download ZIP")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GeminiSettingsDialog(
+    currentApiKey: String,
+    currentModel: String,
+    onDismiss: () -> Unit,
+    onSave: (apiKey: String, modelName: String) -> Unit
+) {
+    var apiKey by remember { mutableStateOf(currentApiKey) }
+    var modelName by remember { mutableStateOf(currentModel) }
+    var showKey by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Slate900,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth().testTag("gemini_settings_dialog")
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Pengaturan Gemini API",
+                        color = Slate100,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Tutup", tint = Slate400)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Dipakai untuk transkripsi otomatis potongan baris pada Mode Transkripsi. Permintaan dikirim langsung ke server Google memakai API key ini.",
+                    color = Slate400,
+                    fontSize = 11.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(text = "API Key", color = Slate400, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    placeholder = { Text("AIza...", color = Slate700, fontSize = 12.sp) },
+                    singleLine = true,
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showKey = !showKey }) {
+                            Icon(
+                                if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showKey) "Sembunyikan" else "Tampilkan",
+                                tint = Slate400
+                            )
+                        }
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Slate100,
+                        unfocusedTextColor = Slate100,
+                        focusedContainerColor = Slate950,
+                        unfocusedContainerColor = Slate950,
+                        focusedBorderColor = Indigo500,
+                        unfocusedBorderColor = Slate800
+                    ),
+                    modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input")
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "Belum punya API key? Buat gratis di Google AI Studio →",
+                    color = Indigo400,
+                    fontSize = 10.sp,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        try { uriHandler.openUri("https://aistudio.google.com/apikey") } catch (_: Exception) {}
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(text = "Nama Model", color = Slate400, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = modelName,
+                    onValueChange = { modelName = it },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Slate100,
+                        unfocusedTextColor = Slate100,
+                        focusedContainerColor = Slate950,
+                        unfocusedContainerColor = Slate950,
+                        focusedBorderColor = Indigo500,
+                        unfocusedBorderColor = Slate800
+                    ),
+                    modifier = Modifier.fillMaxWidth().testTag("gemini_model_input")
+                )
+                Text(
+                    text = "Default: ${GeminiTranscriptionService.DEFAULT_MODEL}",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Catatan: key disimpan lokal di perangkat ini (belum terenkripsi), tidak dikirim ke pihak lain selain Google.",
+                    color = Slate700,
+                    fontSize = 10.sp
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Batal")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { onSave(apiKey, modelName) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("gemini_save_btn")
+                    ) {
+                        Text("Simpan")
                     }
                 }
             }

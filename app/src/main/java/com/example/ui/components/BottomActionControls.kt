@@ -19,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.ContentCopy
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.LastPage
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.FilterCenterFocus
 import androidx.compose.material3.Icon
@@ -87,6 +89,10 @@ fun BottomActionControls(
     onZoomFit: () -> Unit,
     onToggleCrosshair: () -> Unit,
     onToggleSnapping: () -> Unit,
+    isDetectingBoxes: Boolean = false,
+    onAutoDetect: () -> Unit = {},
+    hasAnyBoxes: Boolean = false,
+    onFinishLabeling: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -144,6 +150,28 @@ fun BottomActionControls(
             tint = Emerald400,
             onClick = onAutoAdvance,
             tag = "bottom_autoadvance_btn"
+        )
+
+        DividerBar()
+
+        // Auto-detect text-line boxes via the on-device ONNX model
+        QuickActionButton(
+            icon = Icons.Default.AutoAwesome,
+            label = if (isDetectingBoxes) "..." else "Deteksi",
+            tint = Indigo400,
+            enabled = !isDetectingBoxes,
+            onClick = onAutoDetect,
+            tag = "bottom_autodetect_btn"
+        )
+
+        // Hand off to Transcription mode — crops every box into a line image
+        QuickActionButton(
+            icon = Icons.Default.Translate,
+            label = "Selesai",
+            tint = Emerald400,
+            enabled = hasAnyBoxes,
+            onClick = onFinishLabeling,
+            tag = "bottom_finish_labeling_btn"
         )
 
         // Undo & Redo

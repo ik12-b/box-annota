@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -52,15 +54,19 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.model.AppMode
 import com.example.ui.components.AddClassDialog
 import com.example.ui.components.AnnotationCanvasView
 import com.example.ui.components.AnnotatorToolbar
 import com.example.ui.components.BottomActionControls
 import com.example.ui.components.ExportDatasetDialog
 import com.example.ui.components.FineRotatePanel
+import com.example.ui.components.GeminiSettingsDialog
 import com.example.ui.components.LeftClassDrawer
 import com.example.ui.components.PresetClassesDialog
 import com.example.ui.components.RightBoxDrawer
+import com.example.ui.components.TranscriptionExportDialog
+import com.example.ui.components.TranscriptionModeScreen
 import com.example.ui.theme.Indigo400
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.Slate900
@@ -118,6 +124,7 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    if (uiState.appMode == AppMode.LABELING) {
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -184,6 +191,10 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 onZoomFit = { zoomScale = 1.0f },
                 onToggleCrosshair = { viewModel.toggleCrosshair() },
                 onToggleSnapping = { viewModel.toggleSnapping() },
+                isDetectingBoxes = uiState.isDetectingBoxes,
+                onAutoDetect = { viewModel.autoDetectBoxes() },
+                hasAnyBoxes = uiState.totalBoxesAllPages > 0,
+                onFinishLabeling = { viewModel.finishLabelingAndStartTranscription() },
                 modifier = Modifier.navigationBarsPadding()
             )
         }
@@ -337,6 +348,80 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             }
         }
     }
+    } else {
+        val classNameForCurrentLine = uiState.currentTranscriptionLine?.let { line ->
+            uiState.classes.find { it.id == line.classId }?.name ?: "Tanpa Kelas"
+        } ?: ""
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            TranscriptionModeScreen(
+                currentIndex = uiState.currentTranscriptionIndex,
+                totalLines = uiState.transcriptionLines.size,
+                filledCount = uiState.transcriptionFilledCount,
+                line = uiState.currentTranscriptionLine,
+                className = classNameForCurrentLine,
+                isAutoTranscribing = uiState.isAutoTranscribing,
+                autoTranscribeCurrent = uiState.autoTranscribeCurrent,
+                autoTranscribeTotal = uiState.autoTranscribeTotal,
+                onBack = { viewModel.switchToLabelingMode() },
+                onExport = { viewModel.showTranscriptionExportDialog(true) },
+                onTextChange = { viewModel.updateTranscriptionText(it) },
+                onPrev = { viewModel.prevTranscriptionLine() },
+                onNext = { viewModel.nextTranscriptionLine() },
+                onOpenGeminiSettings = { viewModel.showGeminiSettingsDialog(true) },
+                onAutoTranscribeCurrent = { viewModel.autoTranscribeCurrentLine() },
+                onAutoTranscribeAll = { viewModel.autoTranscribeAllRemaining() },
+                onCancelAutoTranscribe = { viewModel.cancelAutoTranscribeBatch() },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // Floating Toast notification (shared with Labeling mode)
+            AnimatedVisibility(
+                visible = uiState.toastMessage != null,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+            ) {
+                uiState.toastMessage?.let { msg ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Slate900)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = msg, color = Indigo400, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+
+    // Full-screen busy overlay for background work that blocks interaction
+    // (auto-detect inference, cropping boxes into transcription-ready images).
+    AnimatedVisibility(
+        visible = uiState.isDetectingBoxes || uiState.isPreparingTranscription,
+        enter = fadeIn(),
+        exit = fadeOut()
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.6f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = Indigo400)
+                Text(
+                    text = if (uiState.isDetectingBoxes) "Mendeteksi baris teks..." else "Memotong gambar untuk transkripsi...",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 12.dp)
+                )
+            }
+        }
+    }
 
     // Dialogs
     if (uiState.showAddClassDialog) {
@@ -364,6 +449,28 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             onStartExport = { format, startP, endP, incImgs, onlyAnno, split, ratio ->
                 viewModel.startExport(format, startP, endP, incImgs, onlyAnno, split, ratio)
             }
+        )
+    }
+
+    if (uiState.showTranscriptionExportDialog) {
+        TranscriptionExportDialog(
+            totalLines = uiState.transcriptionLines.size,
+            filledLines = uiState.transcriptionFilledCount,
+            isExporting = uiState.isExporting,
+            exportProgress = uiState.exportProgress,
+            exportStatus = uiState.exportStatus,
+            exportedZipFile = uiState.exportedZipFile,
+            onDismiss = { viewModel.showTranscriptionExportDialog(false) },
+            onStartExport = { onlyFilled -> viewModel.startTranscriptionExport(onlyFilled) }
+        )
+    }
+
+    if (uiState.showGeminiSettingsDialog) {
+        GeminiSettingsDialog(
+            currentApiKey = uiState.geminiApiKey,
+            currentModel = uiState.geminiModel,
+            onDismiss = { viewModel.showGeminiSettingsDialog(false) },
+            onSave = { apiKey, modelName -> viewModel.saveGeminiSettings(apiKey, modelName) }
         )
     }
 }
