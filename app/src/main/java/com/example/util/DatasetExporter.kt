@@ -2,8 +2,6 @@ package com.example.util
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import com.example.model.AnnotationBox
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
@@ -35,7 +33,6 @@ class DatasetExporter(private val context: Context) {
         trainRatio: Float,
         classes: List<LabelClass>,
         pageAnnotations: Map<Int, List<AnnotationBox>>,
-        pageRotations: Map<Int, Float>,
         onProgress: (Float, String) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val totalPages = pdfManager.pageCount
@@ -112,19 +109,12 @@ class DatasetExporter(private val context: Context) {
                 val subset = pageSplitMap[pageNum] ?: "all"
                 val baseImgName = "${baseFileName}_page_${String.format(Locale.US, "%04d", pageNum)}"
 
-                // Render page bitmap at 1600px width for high dataset training quality
-                val rawBitmap = pdfManager.renderPage(pageNum - 1, targetWidthPx = 1600)
-                val rotation = pageRotations[pageNum] ?: 0f
-                val bitmap = if (rotation != 0f && rawBitmap != null) {
-                    val result = Bitmap.createBitmap(rawBitmap.width, rawBitmap.height, Bitmap.Config.ARGB_8888)
-                    val canvas = Canvas(result)
-                    canvas.drawColor(Color.WHITE)
-                    canvas.save()
-                    canvas.rotate(rotation, rawBitmap.width / 2f, rawBitmap.height / 2f)
-                    canvas.drawBitmap(rawBitmap, 0f, 0f, null)
-                    canvas.restore()
-                    result
-                } else rawBitmap
+                // Render page bitmap at 1600px width for high dataset training quality.
+                // Rotation is a per-box property now (for labeling individually
+                // skewed/vertical text), not a whole-page deskew, so the page image
+                // itself is exported upright — each box's own angle travels with
+                // its annotation entry below instead.
+                val bitmap = pdfManager.renderPage(pageNum - 1, targetWidthPx = 1600)
                 val width = bitmap?.width ?: 1600
                 val height = bitmap?.height ?: 2200
 
@@ -145,15 +135,21 @@ class DatasetExporter(private val context: Context) {
                 when (format) {
                     ExportFormat.YOLO -> {
                         val yoloSubdir = if (effectiveSplit) "labels/$subset" else "labels"
+                        // Standard YOLO is 5 columns (class, xc, yc, w, h); a 6th
+                        // rotation_deg column is appended so a box's angle isn't
+                        // silently lost — plain YOLO parsers reading only the
+                        // first 5 columns are unaffected, OBB-aware tooling can
+                        // read the extra value.
                         val yoloLines = boxes.map { b ->
                             String.format(
                                 Locale.US,
-                                "%d %.6f %.6f %.6f %.6f",
+                                "%d %.6f %.6f %.6f %.6f %.2f",
                                 b.classId,
                                 b.xCenter,
                                 b.yCenter,
                                 b.width,
-                                b.height
+                                b.height,
+                                b.rotation
                             )
                         }
                         zipWriteFile(zip, "$yoloSubdir/$baseImgName.txt", yoloLines.joinToString("\n").toByteArray())
@@ -188,6 +184,7 @@ class DatasetExporter(private val context: Context) {
                                 put("category_id", b.classId)
                                 put("bbox", bboxArr)
                                 put("area", pxW * pxH)
+                                put("rotation", b.rotation)
                                 put("iscrowd", 0)
                             })
                         }
@@ -210,6 +207,7 @@ class DatasetExporter(private val context: Context) {
                                 val yMax = ((b.y + b.height) * height).toInt()
                                 appendLine("  <object>")
                                 appendLine("    <name>$cls</name>")
+                                appendLine("    <rotation>${String.format(Locale.US, "%.2f", b.rotation)}</rotation>")
                                 appendLine("    <bndbox>")
                                 appendLine("      <xmin>$xMin</xmin>")
                                 appendLine("      <ymin>$yMin</ymin>")
@@ -292,6 +290,14 @@ class DatasetExporter(private val context: Context) {
             }
                 
                 Dataset ini siap digunakan langsung untuk pelatihan model Machine Learning / Computer Vision.
+
+                ## Rotasi Box
+                Box yang diputar (untuk teks miring/vertikal) menyertakan sudut rotasinya
+                dalam derajat, searah jarum jam, relatif ke pusat box:
+                - YOLO: kolom ke-6 tambahan (`rotation_deg`) setelah `class xc yc w h` —
+                  parser YOLO standar yang hanya membaca 5 kolom pertama tidak terpengaruh.
+                - COCO: field `"rotation"` pada tiap objek `annotations`.
+                - Pascal VOC: tag `<rotation>` di dalam tiap `<object>`.
             """.trimIndent()
             zipWriteFile(zip, "README.md", readme.toByteArray())
         }

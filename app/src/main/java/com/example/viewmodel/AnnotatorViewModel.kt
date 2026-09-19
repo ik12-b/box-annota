@@ -43,7 +43,6 @@ data class AnnotatorUiState(
     val classes: List<LabelClass> = LabelPresets.GENERAL,
     val activeClassId: Int = 0,
     val pageAnnotations: Map<Int, List<AnnotationBox>> = emptyMap(),
-    val pageRotations: Map<Int, Float> = emptyMap(),
     val selectedBoxIds: Set<String> = emptySet(),
     val primarySelectedBoxId: String? = null,
     val isCrosshairEnabled: Boolean = false,
@@ -80,7 +79,7 @@ data class AnnotatorUiState(
         get() = pageAnnotations[currentPage] ?: emptyList()
 
     val currentRotation: Float
-        get() = pageRotations[currentPage] ?: 0f
+        get() = primarySelectedBox?.rotation ?: 0f
 
     val totalBoxesAllPages: Int
         get() = pageAnnotations.values.sumOf { it.size }
@@ -171,7 +170,6 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                         totalPages = total,
                         currentPage = 1,
                         pageAnnotations = emptyMap(),
-                        pageRotations = emptyMap(),
                         selectedBoxIds = emptySet(),
                         primarySelectedBoxId = null,
                         canUndo = false,
@@ -252,41 +250,44 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * Rotation is a per-box property (for labeling text that is itself skewed
+     * or vertical), so every rotate control below acts on the primary selected
+     * box via updateBox() — never on the page — which is what makes the angle
+     * stick to that specific box instead of resetting when another box is
+     * selected.
+     */
     fun rotatePageFine(delta: Float) {
-        val pageNum = _uiState.value.currentPage
-        val currentRot = _uiState.value.pageRotations[pageNum] ?: 0f
-        var newRot = kotlin.math.round((currentRot + delta) * 10f) / 10f
+        val box = _uiState.value.primarySelectedBox
+        if (box == null) {
+            showToast("Pilih box dulu untuk mengatur rotasi.")
+            return
+        }
+        var newRot = kotlin.math.round((box.rotation + delta) * 10f) / 10f
         if (kotlin.math.abs(newRot) < 0.05f) newRot = 0f
-        setPageRotation(newRot)
+        newRot = newRot.coerceIn(-180f, 180f)
+        updateBox(box.copy(rotation = newRot))
     }
 
     fun setPageRotation(angle: Float) {
-        val pageNum = _uiState.value.currentPage
+        val box = _uiState.value.primarySelectedBox
+        if (box == null) {
+            showToast("Pilih box dulu untuk mengatur rotasi.")
+            return
+        }
         val clamped = (kotlin.math.round(angle * 10f) / 10f).coerceIn(-180f, 180f)
         val finalRot = if (kotlin.math.abs(clamped) < 0.05f) 0f else clamped
-        _uiState.update { state ->
-            val newRotMap = state.pageRotations.toMutableMap()
-            if (finalRot == 0f) {
-                newRotMap.remove(pageNum)
-            } else {
-                newRotMap[pageNum] = finalRot
-            }
-            state.copy(pageRotations = newRotMap)
-        }
-        val displayStr = if (finalRot > 0f) "+${String.format(java.util.Locale.US, "%.1f", finalRot)}" else String.format(java.util.Locale.US, "%.1f", finalRot)
-        showToast("Rotasi halus hal. $pageNum: ${displayStr}°")
-        saveSession()
+        updateBox(box.copy(rotation = finalRot))
     }
 
     fun resetPageRotation() {
-        val pageNum = _uiState.value.currentPage
-        _uiState.update { state ->
-            val newRotMap = state.pageRotations.toMutableMap()
-            newRotMap.remove(pageNum)
-            state.copy(pageRotations = newRotMap)
+        val box = _uiState.value.primarySelectedBox
+        if (box == null) {
+            showToast("Pilih box dulu untuk mengatur rotasi.")
+            return
         }
-        showToast("Rotasi hal. $pageNum direset (0.0°).")
-        saveSession()
+        updateBox(box.copy(rotation = 0f))
+        showToast("Rotasi box direset (0.0°).")
     }
 
     fun toggleRotatePanel() {
@@ -426,10 +427,20 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 val existingBoxes = _uiState.value.pageAnnotations[pageNum] ?: emptyList()
+                // The detection model finds generic text-line regions — it has no
+                // idea whether a line is a heading or body text — so detected
+                // boxes default to whichever class looks like "Paragraph" rather
+                // than the currently active class (which could be "Header" and
+                // would mislabel every detected line as one).
+                val currentClasses = _uiState.value.classes
+                val paragraphClassId = currentClasses.firstOrNull {
+                    it.name.contains("paragraf", ignoreCase = true) || it.name.contains("paragraph", ignoreCase = true)
+                }?.id ?: _uiState.value.activeClassId
+
                 val newBoxes = detectedRects.mapNotNull { rect ->
                     val candidate = AnnotationBox(
                         id = java.util.UUID.randomUUID().toString(),
-                        classId = _uiState.value.activeClassId,
+                        classId = paragraphClassId,
                         x = rect.left,
                         y = rect.top,
                         width = rect.width(),
@@ -694,7 +705,6 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     trainRatio = trainRatio,
                     classes = _uiState.value.classes,
                     pageAnnotations = _uiState.value.pageAnnotations,
-                    pageRotations = _uiState.value.pageRotations,
                     onProgress = { p, status ->
                         _uiState.update {
                             it.copy(exportProgress = p, exportStatus = status)
@@ -734,7 +744,6 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             it.copy(
                 currentPage = 1,
                 pageAnnotations = emptyMap(),
-                pageRotations = emptyMap(),
                 selectedBoxIds = emptySet(),
                 primarySelectedBoxId = null,
                 canUndo = false,
@@ -1138,15 +1147,12 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                         put("y", b.y.toDouble())
                         put("width", b.width.toDouble())
                         put("height", b.height.toDouble())
+                        put("rotation", b.rotation.toDouble())
                     })
                 }
                 annoObj.put(pageNum.toString(), boxesArr)
             }
             root.put("pageAnnotations", annoObj)
-
-            val rotObj = JSONObject()
-            state.pageRotations.forEach { (p, rot) -> rotObj.put(p.toString(), rot.toDouble()) }
-            root.put("pageRotations", rotObj)
 
             root.put("appMode", state.appMode.name)
             val transcriptionArr = JSONArray()
@@ -1227,22 +1233,12 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                                 x = b.getDouble("x").toFloat(),
                                 y = b.getDouble("y").toFloat(),
                                 width = b.getDouble("width").toFloat(),
-                                height = b.getDouble("height").toFloat()
+                                height = b.getDouble("height").toFloat(),
+                                rotation = b.optDouble("rotation", 0.0).toFloat()
                             )
                         )
                     }
                     pageAnno[pNum] = list
-                }
-            }
-
-            val pageRot = mutableMapOf<Int, Float>()
-            val rotObj = root.optJSONObject("pageRotations")
-            if (rotObj != null) {
-                val keys = rotObj.keys()
-                while (keys.hasNext()) {
-                    val k = keys.next()
-                    val pNum = k.toIntOrNull() ?: continue
-                    pageRot[pNum] = rotObj.optDouble(k, 0.0).toFloat()
                 }
             }
 
@@ -1285,7 +1281,6 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     classes = if (classesList.isNotEmpty()) classesList else LabelPresets.GENERAL,
                     activeClassId = classesList.firstOrNull()?.id ?: 0,
                     pageAnnotations = pageAnno,
-                    pageRotations = pageRot,
                     transcriptionLines = transcriptionLines,
                     currentTranscriptionIndex = savedIndex.coerceIn(0, (transcriptionLines.size - 1).coerceAtLeast(0)),
                     appMode = restoredMode

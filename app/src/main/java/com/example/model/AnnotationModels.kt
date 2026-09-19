@@ -9,7 +9,11 @@ data class AnnotationBox(
     val x: Float,
     val y: Float,
     val width: Float,
-    val height: Float
+    val height: Float,
+    // Per-box visual angle in degrees (clockwise), for labeling text that is
+    // itself skewed or vertical on the page — independent per box, so
+    // selecting a different box never resets or overwrites another box's angle.
+    val rotation: Float = 0f
 ) {
     val right: Float get() = (x + width).coerceAtMost(1f)
     val bottom: Float get() = (y + height).coerceAtMost(1f)
@@ -104,12 +108,3 @@ enum class TouchHandle {
     BOTTOM_RIGHT,
     BODY
 }
-
-data class ProjectSession(
-    val version: String = "2.0",
-    val fileName: String,
-    val totalPages: Int,
-    val pageRotations: Map<Int, Int>,
-    val classes: List<LabelClass>,
-    val pageAnnotations: Map<Int, List<AnnotationBox>>
-)

@@ -220,7 +220,6 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 primarySelectedBoxId = uiState.primarySelectedBoxId,
                 isCrosshairEnabled = uiState.isCrosshairEnabled,
                 isSnappingEnabled = uiState.isSnappingEnabled,
-                currentRotation = uiState.currentRotation,
                 isAlignmentGridEnabled = uiState.isAlignmentGridEnabled,
                 zoomScale = zoomScale,
                 onBoxAdded = { viewModel.addBox(it) },

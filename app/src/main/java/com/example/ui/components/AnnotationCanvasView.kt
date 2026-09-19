@@ -47,6 +47,102 @@ import com.example.ui.theme.Slate950
 
 private const val MIN_BOX_SIZE_NORM = 0.015f
 
+/**
+ * Rotates [point] by [degrees] (clockwise, matching DrawScope.rotate) around
+ * [pivot], both in the same pixel space. Used to find where a box's corner
+ * actually ends up on screen once its own rotation is applied, since pointer
+ * input (hit-testing, dragging) happens outside the DrawScope that renders
+ * the visual rotation and has to redo that math by hand.
+ */
+private fun rotatePoint(point: Offset, pivot: Offset, degrees: Float): Offset {
+    if (degrees == 0f) return point
+    val rad = Math.toRadians(degrees.toDouble())
+    val cos = kotlin.math.cos(rad).toFloat()
+    val sin = kotlin.math.sin(rad).toFloat()
+    val dx = point.x - pivot.x
+    val dy = point.y - pivot.y
+    return Offset(pivot.x + dx * cos - dy * sin, pivot.y + dx * sin + dy * cos)
+}
+
+/** Same rotation as [rotatePoint] but for a direction/delta vector (no pivot). */
+private fun rotateVector(vector: Offset, degrees: Float): Offset {
+    if (degrees == 0f) return vector
+    val rad = Math.toRadians(degrees.toDouble())
+    val cos = kotlin.math.cos(rad).toFloat()
+    val sin = kotlin.math.sin(rad).toFloat()
+    return Offset(vector.x * cos - vector.y * sin, vector.x * sin + vector.y * cos)
+}
+
+/** True if [screenPoint] (canvas pixels) falls inside [box]'s rotated rectangle. */
+private fun isPointInRotatedBox(screenPoint: Offset, box: AnnotationBox, canvasW: Float, canvasH: Float): Boolean {
+    val pxX = box.x * canvasW
+    val pxY = box.y * canvasH
+    val pxW = box.width * canvasW
+    val pxH = box.height * canvasH
+    if (box.rotation == 0f) {
+        return screenPoint.x in pxX..(pxX + pxW) && screenPoint.y in pxY..(pxY + pxH)
+    }
+    val pivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
+    // Un-rotate the tap point into the box's own local frame instead of
+    // rotating the box — cheaper, and the containment check then stays a
+    // plain axis-aligned range check.
+    val local = rotatePoint(screenPoint, pivot, -box.rotation)
+    return local.x in pxX..(pxX + pxW) && local.y in pxY..(pxY + pxH)
+}
+
+/**
+ * Resizes [initial] by dragging [handle] to [currentScreenPoint] (canvas
+ * pixels), keeping the OPPOSITE corner fixed on screen — the geometry that
+ * makes corner-dragging a rotated box feel natural instead of shearing it.
+ * Returns updated (x, y, width, height) in normalized page coordinates.
+ */
+private fun resizeRotatedBox(
+    initial: AnnotationBox,
+    handle: TouchHandle,
+    currentScreenPoint: Offset,
+    canvasW: Float,
+    canvasH: Float
+): AnnotationBox {
+    val pxX = initial.x * canvasW
+    val pxY = initial.y * canvasH
+    val pxW = initial.width * canvasW
+    val pxH = initial.height * canvasH
+    val pivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
+    val rot = initial.rotation
+
+    // anchorLocal = the corner OPPOSITE the one being dragged (stays fixed on
+    // screen); sign = direction, in the box's own unrotated frame, from that
+    // anchor toward the dragged corner.
+    val (anchorLocal, signX, signY) = when (handle) {
+        TouchHandle.BOTTOM_RIGHT -> Triple(Offset(pxX, pxY), 1f, 1f)
+        TouchHandle.TOP_LEFT -> Triple(Offset(pxX + pxW, pxY + pxH), -1f, -1f)
+        TouchHandle.TOP_RIGHT -> Triple(Offset(pxX, pxY + pxH), 1f, -1f)
+        TouchHandle.BOTTOM_LEFT -> Triple(Offset(pxX + pxW, pxY), -1f, 1f)
+        else -> return initial
+    }
+
+    val anchorScreen = rotatePoint(anchorLocal, pivot, rot)
+    val deltaLocal = rotateVector(currentScreenPoint - anchorScreen, -rot)
+
+    val minPx = MIN_BOX_SIZE_NORM * canvasW
+    val minPy = MIN_BOX_SIZE_NORM * canvasH
+    val newWpx = (deltaLocal.x * signX).coerceAtLeast(minPx)
+    val newHpx = (deltaLocal.y * signY).coerceAtLeast(minPy)
+
+    val centerOffsetLocal = Offset(signX * newWpx / 2f, signY * newHpx / 2f)
+    val newPivotScreen = anchorScreen + rotateVector(centerOffsetLocal, rot)
+
+    val newXpx = newPivotScreen.x - newWpx / 2f
+    val newYpx = newPivotScreen.y - newHpx / 2f
+
+    val newX = (newXpx / canvasW).coerceIn(0f, 1f - MIN_BOX_SIZE_NORM)
+    val newY = (newYpx / canvasH).coerceIn(0f, 1f - MIN_BOX_SIZE_NORM)
+    val newW = (newWpx / canvasW).coerceIn(MIN_BOX_SIZE_NORM, 1f)
+    val newH = (newHpx / canvasH).coerceIn(MIN_BOX_SIZE_NORM, 1f)
+
+    return initial.copy(x = newX, y = newY, width = newW, height = newH)
+}
+
 @Composable
 fun AnnotationCanvasView(
     bitmap: Bitmap?,
@@ -61,7 +157,6 @@ fun AnnotationCanvasView(
     primarySelectedBoxId: String?,
     isCrosshairEnabled: Boolean,
     isSnappingEnabled: Boolean,
-    currentRotation: Float = 0f,
     isAlignmentGridEnabled: Boolean = false,
     zoomScale: Float,
     onBoxAdded: (AnnotationBox) -> Unit,
@@ -208,7 +303,8 @@ fun AnnotationCanvasView(
                 val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
 
                 // Image layer: intentionally NOT rotated. The page bitmap always
-                // stays upright regardless of currentRotation.
+                // stays upright — rotation is a per-box label attribute, not a
+                // page-level view transform.
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
@@ -223,9 +319,8 @@ fun AnnotationCanvasView(
 
                 // Box/overlay layer: carries the crosshair guides, bounding boxes
                 // and drag handles, plus all pointer input. The layer itself is
-                // NOT rotated — only the currently selected box is spun (around
-                // its own center) when currentRotation changes, via a per-box
-                // rotate() inside the draw pass below.
+                // NOT rotated — each box is spun individually around its own
+                // center using its own stored rotation, inside the draw pass below.
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
@@ -234,12 +329,11 @@ fun AnnotationCanvasView(
                             detectTapGestures { tapOffset ->
                                 val canvasW = size.width.toFloat()
                                 val canvasH = size.height.toFloat()
-                                val normX = tapOffset.x / canvasW
-                                val normY = tapOffset.y / canvasH
 
-                                // Check if tapped inside any box (topmost first)
+                                // Check if tapped inside any box (topmost first),
+                                // accounting for each box's own rotation.
                                 val tappedBox = latestBoxes.value.asReversed().find { b ->
-                                    normX in b.x..b.right && normY in b.y..b.bottom
+                                    isPointInRotatedBox(tapOffset, b, canvasW, canvasH)
                                 }
 
                                 if (tappedBox != null) {
@@ -255,24 +349,26 @@ fun AnnotationCanvasView(
                                     val boxes = latestBoxes.value
                                     val canvasW = size.width.toFloat()
                                     val canvasH = size.height.toFloat()
-                                    val normX = (startOffset.x / canvasW).coerceIn(0f, 1f)
-                                    val normY = (startOffset.y / canvasH).coerceIn(0f, 1f)
 
                                     dragStartOffset = startOffset
                                     crosshairPos = startOffset
 
-                                    // 1. Check if primary selected box handles were hit
+                                    // 1. Check if primary selected box handles were hit —
+                                    // using the handles' actual ROTATED screen positions,
+                                    // since that's where they're drawn.
                                     val primaryBox = boxes.find { it.id == primarySelectedBoxId }
                                     if (primaryBox != null) {
                                         val pxX = primaryBox.x * canvasW
                                         val pxY = primaryBox.y * canvasH
                                         val pxW = primaryBox.width * canvasW
                                         val pxH = primaryBox.height * canvasH
+                                        val pivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
+                                        val rot = primaryBox.rotation
 
-                                        val tl = Offset(pxX, pxY)
-                                        val tr = Offset(pxX + pxW, pxY)
-                                        val bl = Offset(pxX, pxY + pxH)
-                                        val br = Offset(pxX + pxW, pxY + pxH)
+                                        val tl = rotatePoint(Offset(pxX, pxY), pivot, rot)
+                                        val tr = rotatePoint(Offset(pxX + pxW, pxY), pivot, rot)
+                                        val bl = rotatePoint(Offset(pxX, pxY + pxH), pivot, rot)
+                                        val br = rotatePoint(Offset(pxX + pxW, pxY + pxH), pivot, rot)
 
                                         val handle = when {
                                             (startOffset - tl).getDistance() <= handleTouchRadiusPx -> TouchHandle.TOP_LEFT
@@ -290,9 +386,10 @@ fun AnnotationCanvasView(
                                         }
                                     }
 
-                                    // 2. Check if clicked inside an existing box (move mode)
+                                    // 2. Check if clicked inside an existing box (move mode),
+                                    // accounting for each box's own rotation.
                                     val hitBox = boxes.asReversed().find { b ->
-                                        normX in b.x..b.right && normY in b.y..b.bottom
+                                        isPointInRotatedBox(startOffset, b, canvasW, canvasH)
                                     }
 
                                     if (hitBox != null) {
@@ -307,6 +404,8 @@ fun AnnotationCanvasView(
                                     activeHandle = TouchHandle.NONE
                                     activeDragBoxId = null
                                     initialBoxState = null
+                                    val normX = (startOffset.x / canvasW).coerceIn(0f, 1f)
+                                    val normY = (startOffset.y / canvasH).coerceIn(0f, 1f)
                                     currentDrawBox = AnnotationBox(
                                         classId = activeClassId,
                                         x = normX,
@@ -330,39 +429,30 @@ fun AnnotationCanvasView(
                                     if (activeDragBoxId != null && initial != null) {
                                         when (activeHandle) {
                                             TouchHandle.BODY -> {
+                                                // Translation is rotation-invariant, so this
+                                                // needs no rotation-aware handling.
                                                 val deltaX = curNormX - startNormX
                                                 val deltaY = curNormY - startNormY
                                                 val newX = (initial.x + deltaX).coerceIn(0f, 1f - initial.width)
                                                 val newY = (initial.y + deltaY).coerceIn(0f, 1f - initial.height)
                                                 onBoxUpdated(initial.copy(x = newX, y = newY))
                                             }
-                                            TouchHandle.BOTTOM_RIGHT -> {
-                                                val newW = (curNormX - initial.x).coerceIn(MIN_BOX_SIZE_NORM, 1f - initial.x)
-                                                val newH = (curNormY - initial.y).coerceIn(MIN_BOX_SIZE_NORM, 1f - initial.y)
-                                                onBoxUpdated(initial.copy(width = newW, height = newH))
-                                            }
-                                            TouchHandle.TOP_LEFT -> {
-                                                val maxRight = initial.right
-                                                val maxBottom = initial.bottom
-                                                val newX = curNormX.coerceIn(0f, maxRight - MIN_BOX_SIZE_NORM)
-                                                val newY = curNormY.coerceIn(0f, maxBottom - MIN_BOX_SIZE_NORM)
-                                                val newW = maxRight - newX
-                                                val newH = maxBottom - newY
-                                                onBoxUpdated(initial.copy(x = newX, y = newY, width = newW, height = newH))
-                                            }
-                                            TouchHandle.TOP_RIGHT -> {
-                                                val maxBottom = initial.bottom
-                                                val newY = curNormY.coerceIn(0f, maxBottom - MIN_BOX_SIZE_NORM)
-                                                val newW = (curNormX - initial.x).coerceIn(MIN_BOX_SIZE_NORM, 1f - initial.x)
-                                                val newH = maxBottom - newY
-                                                onBoxUpdated(initial.copy(y = newY, width = newW, height = newH))
-                                            }
-                                            TouchHandle.BOTTOM_LEFT -> {
-                                                val maxRight = initial.right
-                                                val newX = curNormX.coerceIn(0f, maxRight - MIN_BOX_SIZE_NORM)
-                                                val newW = maxRight - newX
-                                                val newH = (curNormY - initial.y).coerceIn(MIN_BOX_SIZE_NORM, 1f - initial.y)
-                                                onBoxUpdated(initial.copy(x = newX, width = newW, height = newH))
+                                            TouchHandle.BOTTOM_RIGHT, TouchHandle.TOP_LEFT,
+                                            TouchHandle.TOP_RIGHT, TouchHandle.BOTTOM_LEFT -> {
+                                                // Resizing a rotated box by dragging a corner
+                                                // needs to keep the OPPOSITE corner fixed on
+                                                // screen and work in the box's own (rotated)
+                                                // axes — a plain axis-aligned resize would
+                                                // shear a rotated box instead of resizing it.
+                                                onBoxUpdated(
+                                                    resizeRotatedBox(
+                                                        initial = initial,
+                                                        handle = activeHandle,
+                                                        currentScreenPoint = change.position,
+                                                        canvasW = canvasW,
+                                                        canvasH = canvasH
+                                                    )
+                                                )
                                             }
                                             TouchHandle.NONE -> {}
                                         }
@@ -440,9 +530,10 @@ fun AnnotationCanvasView(
                         val pxW = box.width * canvasW
                         val pxH = box.height * canvasH
 
-                        // Only the primary-selected box is visually rotated (around
-                        // its own center); every other box is drawn upright.
-                        val boxRotationDeg = if (isPrimary) currentRotation else 0f
+                        // Every box carries its own rotation now (for labeling
+                        // skewed/vertical text), so all of them are drawn rotated
+                        // around their own center — not just the selected one.
+                        val boxRotationDeg = box.rotation
                         val boxPivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
 
                         rotate(degrees = boxRotationDeg, pivot = boxPivot) {
