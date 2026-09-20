@@ -17,7 +17,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FirstPage
@@ -88,6 +90,8 @@ fun AnnotatorToolbar(
     onToggleRightDrawer: () -> Unit,
     hasTranscriptionLines: Boolean = false,
     onSwitchToTranscription: () -> Unit = {},
+    isBackupConfigured: Boolean = false,
+    onOpenBackupSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Wrapped in horizontalScroll as a hard guarantee: on a narrow portrait
@@ -206,6 +210,24 @@ fun AnnotatorToolbar(
                 modifier = Modifier.size(16.dp)
             )
             Text(text = " Export", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
+
+        IconButton(
+            onClick = onOpenBackupSettings,
+            colors = IconButtonDefaults.iconButtonColors(
+                containerColor = if (isBackupConfigured) Emerald950 else Color.Transparent,
+                contentColor = if (isBackupConfigured) Emerald400 else Slate400
+            ),
+            modifier = Modifier
+                .size(36.dp)
+                .testTag("toolbar_backup_settings_btn")
+        ) {
+            Icon(
+                imageVector = if (isBackupConfigured) Icons.Default.CloudDone else Icons.Default.Backup,
+                contentDescription = "Backup & Pemulihan",
+                tint = if (isBackupConfigured) Emerald400 else Slate400,
+                modifier = Modifier.size(18.dp)
+            )
         }
 
         IconButton(

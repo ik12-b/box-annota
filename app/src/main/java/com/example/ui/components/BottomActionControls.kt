@@ -110,6 +110,8 @@ fun BottomActionControls(
     onAutoDetect: () -> Unit = {},
     hasAnyBoxes: Boolean = false,
     onFinishLabeling: () -> Unit = {},
+    onResizeBoxWidth: (Float) -> Unit = {},
+    onResizeBoxHeight: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -310,6 +312,73 @@ fun BottomActionControls(
 
                 HorizontalDivider(color = Slate800)
                 Text(
+                    text = "UKURAN BOX",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                // A dedicated button to grow/shrink WIDTH only, and a separate
+                // one for HEIGHT only — the buttons are the point here (an
+                // alternative to dragging the box's edge handles), so each one
+                // is spelled out with a full label rather than a bare icon.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "Lebar",
+                        color = Slate400,
+                        fontSize = 11.sp,
+                        modifier = Modifier.width(42.dp)
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Remove,
+                        label = "Kecil",
+                        enabled = hasSelectedBox,
+                        onClick = { onResizeBoxWidth(-BOX_SIZE_STEP) },
+                        tag = "bottom_width_minus_btn"
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Add,
+                        label = "Besar",
+                        tint = Indigo400,
+                        enabled = hasSelectedBox,
+                        onClick = { onResizeBoxWidth(BOX_SIZE_STEP) },
+                        tag = "bottom_width_plus_btn"
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "Tinggi",
+                        color = Slate400,
+                        fontSize = 11.sp,
+                        modifier = Modifier.width(42.dp)
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Remove,
+                        label = "Kecil",
+                        enabled = hasSelectedBox,
+                        onClick = { onResizeBoxHeight(-BOX_SIZE_STEP) },
+                        tag = "bottom_height_minus_btn"
+                    )
+                    QuickActionButton(
+                        icon = Icons.Default.Add,
+                        label = "Besar",
+                        tint = Indigo400,
+                        enabled = hasSelectedBox,
+                        onClick = { onResizeBoxHeight(BOX_SIZE_STEP) },
+                        tag = "bottom_height_plus_btn"
+                    )
+                }
+
+                HorizontalDivider(color = Slate800)
+                Text(
                     text = "TAMPILAN",
                     color = Slate700,
                     fontSize = 10.sp,
@@ -379,6 +448,9 @@ fun BottomActionControls(
         }
     }
 }
+
+/** Normalized step (fraction of page width/height) per width/height button tap. */
+private const val BOX_SIZE_STEP = 0.02f
 
 @Composable
 private fun QuickActionButton(

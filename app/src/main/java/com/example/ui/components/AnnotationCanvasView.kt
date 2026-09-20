@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -40,12 +41,11 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.AnnotationBox
+import com.example.model.MIN_BOX_SIZE_NORM
 import com.example.model.LabelClass
 import com.example.model.TouchHandle
 import com.example.ui.theme.Slate800
 import com.example.ui.theme.Slate950
-
-private const val MIN_BOX_SIZE_NORM = 0.015f
 
 /**
  * Rotates [point] by [degrees] (clockwise, matching DrawScope.rotate) around
@@ -91,11 +91,21 @@ private fun isPointInRotatedBox(screenPoint: Offset, box: AnnotationBox, canvasW
 }
 
 /**
- * Resizes [initial] by dragging [handle] to [currentScreenPoint] (canvas
- * pixels), keeping the OPPOSITE corner fixed on screen — the geometry that
- * makes corner-dragging a rotated box feel natural instead of shearing it.
- * Returns updated (x, y, width, height) in normalized page coordinates.
+ * Which corner/edge-midpoint a resize handle anchors from: [anchorLocal] is
+ * the point OPPOSITE the dragged handle (stays fixed on screen), signX/signY
+ * give the drag direction along each local axis (0 = that axis doesn't move
+ * at all), and freeW/freeH say whether width/height are allowed to change —
+ * false for the axis an edge-midpoint handle intentionally leaves untouched,
+ * so dragging just the right edge changes width only, never height.
  */
+private data class ResizeSpec(
+    val anchorLocal: Offset,
+    val signX: Float,
+    val signY: Float,
+    val freeW: Boolean,
+    val freeH: Boolean
+)
+
 private fun resizeRotatedBox(
     initial: AnnotationBox,
     handle: TouchHandle,
@@ -110,26 +120,32 @@ private fun resizeRotatedBox(
     val pivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
     val rot = initial.rotation
 
-    // anchorLocal = the corner OPPOSITE the one being dragged (stays fixed on
-    // screen); sign = direction, in the box's own unrotated frame, from that
-    // anchor toward the dragged corner.
-    val (anchorLocal, signX, signY) = when (handle) {
-        TouchHandle.BOTTOM_RIGHT -> Triple(Offset(pxX, pxY), 1f, 1f)
-        TouchHandle.TOP_LEFT -> Triple(Offset(pxX + pxW, pxY + pxH), -1f, -1f)
-        TouchHandle.TOP_RIGHT -> Triple(Offset(pxX, pxY + pxH), 1f, -1f)
-        TouchHandle.BOTTOM_LEFT -> Triple(Offset(pxX + pxW, pxY), -1f, 1f)
+    val spec = when (handle) {
+        TouchHandle.BOTTOM_RIGHT -> ResizeSpec(Offset(pxX, pxY), 1f, 1f, freeW = true, freeH = true)
+        TouchHandle.TOP_LEFT -> ResizeSpec(Offset(pxX + pxW, pxY + pxH), -1f, -1f, freeW = true, freeH = true)
+        TouchHandle.TOP_RIGHT -> ResizeSpec(Offset(pxX, pxY + pxH), 1f, -1f, freeW = true, freeH = true)
+        TouchHandle.BOTTOM_LEFT -> ResizeSpec(Offset(pxX + pxW, pxY), -1f, 1f, freeW = true, freeH = true)
+        // Edge midpoints: only one dimension is "free" — the box's other
+        // dimension and its position along that axis never move.
+        TouchHandle.RIGHT -> ResizeSpec(Offset(pxX, pxY + pxH / 2f), 1f, 0f, freeW = true, freeH = false)
+        TouchHandle.LEFT -> ResizeSpec(Offset(pxX + pxW, pxY + pxH / 2f), -1f, 0f, freeW = true, freeH = false)
+        TouchHandle.BOTTOM -> ResizeSpec(Offset(pxX + pxW / 2f, pxY), 0f, 1f, freeW = false, freeH = true)
+        TouchHandle.TOP -> ResizeSpec(Offset(pxX + pxW / 2f, pxY + pxH), 0f, -1f, freeW = false, freeH = true)
         else -> return initial
     }
 
-    val anchorScreen = rotatePoint(anchorLocal, pivot, rot)
+    val anchorScreen = rotatePoint(spec.anchorLocal, pivot, rot)
     val deltaLocal = rotateVector(currentScreenPoint - anchorScreen, -rot)
 
     val minPx = MIN_BOX_SIZE_NORM * canvasW
     val minPy = MIN_BOX_SIZE_NORM * canvasH
-    val newWpx = (deltaLocal.x * signX).coerceAtLeast(minPx)
-    val newHpx = (deltaLocal.y * signY).coerceAtLeast(minPy)
+    val newWpx = if (spec.freeW) (deltaLocal.x * spec.signX).coerceAtLeast(minPx) else pxW
+    val newHpx = if (spec.freeH) (deltaLocal.y * spec.signY).coerceAtLeast(minPy) else pxH
 
-    val centerOffsetLocal = Offset(signX * newWpx / 2f, signY * newHpx / 2f)
+    val centerOffsetLocal = Offset(
+        if (spec.signX != 0f) spec.signX * newWpx / 2f else 0f,
+        if (spec.signY != 0f) spec.signY * newHpx / 2f else 0f
+    )
     val newPivotScreen = anchorScreen + rotateVector(centerOffsetLocal, rot)
 
     val newXpx = newPivotScreen.x - newWpx / 2f
@@ -150,6 +166,7 @@ fun AnnotationCanvasView(
     hasDocument: Boolean = true,
     isRestoringSession: Boolean = false,
     onOpenPdf: (() -> Unit)? = null,
+    onRestoreFromBackup: (() -> Unit)? = null,
     boxes: List<AnnotationBox>,
     classes: List<LabelClass>,
     activeClassId: Int,
@@ -167,7 +184,7 @@ fun AnnotationCanvasView(
 ) {
     val density = LocalDensity.current
     val handleTouchRadiusPx = with(density) { 26.dp.toPx() }
-    val handleDrawRadiusPx = with(density) { 7.dp.toPx() }
+    val handleDrawRadiusPx = with(density) { 5.dp.toPx() }
 
     val latestBoxes = androidx.compose.runtime.rememberUpdatedState(boxes)
 
@@ -226,6 +243,22 @@ fun AnnotationCanvasView(
                         fontSize = 12.sp,
                         modifier = Modifier.padding(top = 8.dp)
                     )
+                    if (onRestoreFromBackup != null) {
+                        Text(
+                            text = "Baru install ulang? Pulihkan data lama dari folder backup.",
+                            color = Color(0xFF818CF8),
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .padding(top = 18.dp)
+                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                                .background(Color(0xFF1E293B))
+                                .clickable(
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    indication = null
+                                ) { onRestoreFromBackup.invoke() }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
             return@Box
@@ -369,14 +402,33 @@ fun AnnotationCanvasView(
                                         val tr = rotatePoint(Offset(pxX + pxW, pxY), pivot, rot)
                                         val bl = rotatePoint(Offset(pxX, pxY + pxH), pivot, rot)
                                         val br = rotatePoint(Offset(pxX + pxW, pxY + pxH), pivot, rot)
+                                        // Edge midpoints — dragging one of these resizes only
+                                        // that single axis (width for left/right, height for
+                                        // top/bottom) instead of both at once like a corner does.
+                                        val topMid = rotatePoint(Offset(pxX + pxW / 2f, pxY), pivot, rot)
+                                        val bottomMid = rotatePoint(Offset(pxX + pxW / 2f, pxY + pxH), pivot, rot)
+                                        val leftMid = rotatePoint(Offset(pxX, pxY + pxH / 2f), pivot, rot)
+                                        val rightMid = rotatePoint(Offset(pxX + pxW, pxY + pxH / 2f), pivot, rot)
 
-                                        val handle = when {
-                                            (startOffset - tl).getDistance() <= handleTouchRadiusPx -> TouchHandle.TOP_LEFT
-                                            (startOffset - tr).getDistance() <= handleTouchRadiusPx -> TouchHandle.TOP_RIGHT
-                                            (startOffset - bl).getDistance() <= handleTouchRadiusPx -> TouchHandle.BOTTOM_LEFT
-                                            (startOffset - br).getDistance() <= handleTouchRadiusPx -> TouchHandle.BOTTOM_RIGHT
-                                            else -> TouchHandle.NONE
-                                        }
+                                        val candidates = listOf(
+                                            tl to TouchHandle.TOP_LEFT,
+                                            tr to TouchHandle.TOP_RIGHT,
+                                            bl to TouchHandle.BOTTOM_LEFT,
+                                            br to TouchHandle.BOTTOM_RIGHT,
+                                            topMid to TouchHandle.TOP,
+                                            bottomMid to TouchHandle.BOTTOM,
+                                            leftMid to TouchHandle.LEFT,
+                                            rightMid to TouchHandle.RIGHT
+                                        )
+                                        // Pick whichever handle the touch is actually closest to
+                                        // (not just "first within radius") — on a small box the
+                                        // corner and edge-midpoint hit zones can overlap, and this
+                                        // keeps the closer one winning instead of always the corner.
+                                        val handle = candidates
+                                            .map { (pos, h) -> (startOffset - pos).getDistance() to h }
+                                            .filter { (dist, _) -> dist <= handleTouchRadiusPx }
+                                            .minByOrNull { (dist, _) -> dist }
+                                            ?.second ?: TouchHandle.NONE
 
                                         if (handle != TouchHandle.NONE) {
                                             activeHandle = handle
@@ -438,12 +490,18 @@ fun AnnotationCanvasView(
                                                 onBoxUpdated(initial.copy(x = newX, y = newY))
                                             }
                                             TouchHandle.BOTTOM_RIGHT, TouchHandle.TOP_LEFT,
-                                            TouchHandle.TOP_RIGHT, TouchHandle.BOTTOM_LEFT -> {
-                                                // Resizing a rotated box by dragging a corner
-                                                // needs to keep the OPPOSITE corner fixed on
-                                                // screen and work in the box's own (rotated)
-                                                // axes — a plain axis-aligned resize would
-                                                // shear a rotated box instead of resizing it.
+                                            TouchHandle.TOP_RIGHT, TouchHandle.BOTTOM_LEFT,
+                                            TouchHandle.TOP, TouchHandle.BOTTOM,
+                                            TouchHandle.LEFT, TouchHandle.RIGHT -> {
+                                                // Resizing a rotated box by dragging a corner or
+                                                // edge midpoint needs to keep the OPPOSITE
+                                                // corner/edge fixed on screen and work in the
+                                                // box's own (rotated) axes — a plain axis-aligned
+                                                // resize would shear a rotated box instead of
+                                                // resizing it. Edge midpoints only free up one
+                                                // dimension (see resizeRotatedBox's ResizeSpec),
+                                                // which is what makes width-only/height-only
+                                                // resize possible.
                                                 onBoxUpdated(
                                                     resizeRotatedBox(
                                                         initial = initial,
@@ -537,42 +595,67 @@ fun AnnotationCanvasView(
                         val boxPivot = Offset(pxX + pxW / 2f, pxY + pxH / 2f)
 
                         rotate(degrees = boxRotationDeg, pivot = boxPivot) {
-                            // Fill with semi-transparency
+                            // Fill kept very light, and the border as thin/translucent
+                            // as still reasonably visible, so the box outline doesn't
+                            // bury small text underneath it while labeling.
                             drawRect(
-                                color = boxColor.copy(alpha = if (isSelected) 0.35f else 0.18f),
+                                color = boxColor.copy(alpha = if (isSelected) 0.16f else 0.06f),
                                 topLeft = Offset(pxX, pxY),
                                 size = Size(pxW, pxH)
                             )
 
                             // Border Stroke
                             drawRect(
-                                color = boxColor,
+                                color = boxColor.copy(alpha = if (isSelected) 0.85f else 0.55f),
                                 topLeft = Offset(pxX, pxY),
                                 size = Size(pxW, pxH),
-                                style = Stroke(width = if (isSelected) 3.5f else 2.2f)
+                                style = Stroke(width = if (isSelected) 1.6f else 1f)
                             )
 
-                            // Draw Corner Handles for Primary Selection
+                            // Handles for Primary Selection: 4 corners (resize both
+                            // dimensions) + 4 edge midpoints (resize width OR height
+                            // only) — small bars on the edges hint at their single-axis
+                            // drag direction.
                             if (isPrimary) {
-                                val handles = listOf(
+                                val corners = listOf(
                                     Offset(pxX, pxY),
                                     Offset(pxX + pxW, pxY),
                                     Offset(pxX, pxY + pxH),
                                     Offset(pxX + pxW, pxY + pxH)
                                 )
-                                handles.forEach { h ->
-                                    drawCircle(
-                                        color = Color.White,
-                                        radius = handleDrawRadiusPx,
-                                        center = h
-                                    )
+                                corners.forEach { h ->
+                                    drawCircle(color = Color.White, radius = handleDrawRadiusPx, center = h)
                                     drawCircle(
                                         color = boxColor,
                                         radius = handleDrawRadiusPx,
                                         center = h,
-                                        style = Stroke(width = 2.5f)
+                                        style = Stroke(width = 2f)
                                     )
                                 }
+
+                                val edgeBarLong = handleDrawRadiusPx * 2.2f
+                                val edgeBarShort = handleDrawRadiusPx * 0.9f
+                                fun drawEdgeBar(center: Offset, horizontal: Boolean) {
+                                    val size = if (horizontal) Size(edgeBarLong, edgeBarShort) else Size(edgeBarShort, edgeBarLong)
+                                    val topLeft = Offset(center.x - size.width / 2f, center.y - size.height / 2f)
+                                    drawRoundRect(
+                                        color = Color.White,
+                                        topLeft = topLeft,
+                                        size = size,
+                                        cornerRadius = CornerRadius(edgeBarShort / 2f)
+                                    )
+                                    drawRoundRect(
+                                        color = boxColor,
+                                        topLeft = topLeft,
+                                        size = size,
+                                        cornerRadius = CornerRadius(edgeBarShort / 2f),
+                                        style = Stroke(width = 1.6f)
+                                    )
+                                }
+                                drawEdgeBar(Offset(pxX + pxW / 2f, pxY), horizontal = true)       // TOP: width fixed, drag = height
+                                drawEdgeBar(Offset(pxX + pxW / 2f, pxY + pxH), horizontal = true) // BOTTOM
+                                drawEdgeBar(Offset(pxX, pxY + pxH / 2f), horizontal = false)      // LEFT: height fixed, drag = width
+                                drawEdgeBar(Offset(pxX + pxW, pxY + pxH / 2f), horizontal = false) // RIGHT
                             }
                         }
                     }
@@ -586,16 +669,16 @@ fun AnnotationCanvasView(
                         val pxH = dBox.height * canvasH
 
                         drawRect(
-                            color = cls.composeColor.copy(alpha = 0.25f),
+                            color = cls.composeColor.copy(alpha = 0.14f),
                             topLeft = Offset(pxX, pxY),
                             size = Size(pxW, pxH)
                         )
                         drawRect(
-                            color = cls.composeColor,
+                            color = cls.composeColor.copy(alpha = 0.85f),
                             topLeft = Offset(pxX, pxY),
                             size = Size(pxW, pxH),
                             style = Stroke(
-                                width = 2.5f,
+                                width = 1.4f,
                                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 14f))
                             )
                         )

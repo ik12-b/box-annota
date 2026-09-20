@@ -3,6 +3,9 @@ package com.example.model
 import androidx.compose.ui.graphics.Color
 import java.util.UUID
 
+/** Smallest allowed box dimension, normalized (0..1) to the page's width/height. */
+const val MIN_BOX_SIZE_NORM = 0.015f
+
 data class AnnotationBox(
     val id: String = UUID.randomUUID().toString(),
     val classId: Int,
@@ -52,7 +55,12 @@ object LabelPresets {
         LabelClass(2, "Paragraph", 0xFF3B82F6L),
         LabelClass(3, "Table / Grid", 0xFF10B981L),
         LabelClass(4, "Image / Figure", 0xFFF59E0BL),
-        LabelClass(5, "Footer / Caption", 0xFF8B5CF6L)
+        LabelClass(5, "Footer / Caption", 0xFF8B5CF6L),
+        // Ornamental border/frame around a page or text block. Its box is
+        // expected to overlap whatever text classes sit inside it — that's
+        // normal nested structure in a detection dataset (see checkOverlap(),
+        // which only warns on same-class overlap), not a labeling mistake.
+        LabelClass(6, "Bingkai / Border", 0xFF06B6D4L)
     )
 
     val INVOICE = listOf(
@@ -106,5 +114,12 @@ enum class TouchHandle {
     TOP_RIGHT,
     BOTTOM_LEFT,
     BOTTOM_RIGHT,
+    // Edge midpoints — dragging these resizes only ONE dimension (width for
+    // LEFT/RIGHT, height for TOP/BOTTOM) instead of both at once like a
+    // corner drag does.
+    TOP,
+    BOTTOM,
+    LEFT,
+    RIGHT,
     BODY
 }

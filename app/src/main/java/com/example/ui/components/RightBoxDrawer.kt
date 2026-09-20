@@ -19,10 +19,16 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FormatQuote
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ButtonDefaults
@@ -69,6 +75,8 @@ fun RightBoxDrawer(
     totalBoxesAllPages: Int,
     onBoxSelected: (String) -> Unit,
     onDeleteBox: (String) -> Unit,
+    onNudgeBox: (dx: Float, dy: Float) -> Unit = { _, _ -> },
+    onResizeBox: (dWidth: Float, dHeight: Float) -> Unit = { _, _ -> },
     onResetProject: () -> Unit,
     onCloseDrawer: () -> Unit,
     modifier: Modifier = Modifier
@@ -324,6 +332,102 @@ fun RightBoxDrawer(
                     fontFamily = FontFamily.Monospace,
                     lineHeight = 16.sp
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = Slate800)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Move/resize via buttons — an alternative to dragging on the
+                // canvas for small, precise adjustments that are fiddly to
+                // land exactly right with a fingertip.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "POSISI",
+                            color = Slate400,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.6.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        NudgeButton(
+                            icon = Icons.Default.KeyboardArrowUp,
+                            onClick = { onNudgeBox(0f, -NUDGE_STEP) },
+                            tag = "nudge_up_btn"
+                        )
+                        Row {
+                            NudgeButton(
+                                icon = Icons.Default.KeyboardArrowLeft,
+                                onClick = { onNudgeBox(-NUDGE_STEP, 0f) },
+                                tag = "nudge_left_btn"
+                            )
+                            Spacer(modifier = Modifier.width(28.dp))
+                            NudgeButton(
+                                icon = Icons.Default.KeyboardArrowRight,
+                                onClick = { onNudgeBox(NUDGE_STEP, 0f) },
+                                tag = "nudge_right_btn"
+                            )
+                        }
+                        NudgeButton(
+                            icon = Icons.Default.KeyboardArrowDown,
+                            onClick = { onNudgeBox(0f, NUDGE_STEP) },
+                            tag = "nudge_down_btn"
+                        )
+                    }
+
+                    Column {
+                        Text(
+                            text = "UKURAN",
+                            color = Slate400,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.6.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Lebar",
+                                color = Slate400,
+                                fontSize = 10.sp,
+                                modifier = Modifier.width(38.dp)
+                            )
+                            NudgeButton(
+                                icon = Icons.Default.Remove,
+                                onClick = { onResizeBox(-NUDGE_STEP, 0f) },
+                                tag = "resize_width_minus_btn"
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            NudgeButton(
+                                icon = Icons.Default.Add,
+                                onClick = { onResizeBox(NUDGE_STEP, 0f) },
+                                tag = "resize_width_plus_btn"
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Tinggi",
+                                color = Slate400,
+                                fontSize = 10.sp,
+                                modifier = Modifier.width(38.dp)
+                            )
+                            NudgeButton(
+                                icon = Icons.Default.Remove,
+                                onClick = { onResizeBox(0f, -NUDGE_STEP) },
+                                tag = "resize_height_minus_btn"
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            NudgeButton(
+                                icon = Icons.Default.Add,
+                                onClick = { onResizeBox(0f, NUDGE_STEP) },
+                                tag = "resize_height_plus_btn"
+                            )
+                        }
+                    }
+                }
             } else {
                 Text(
                     text = "Pilih bounding box untuk melihat info koordinat dan kelas aktif.",
@@ -376,5 +480,30 @@ fun RightBoxDrawer(
             Spacer(modifier = Modifier.width(6.dp))
             Text(text = "Mulai Baru (Hapus Sesi)", fontSize = 11.sp)
         }
+    }
+}
+
+/** Normalized step (fraction of page width/height) per button tap. */
+private const val NUDGE_STEP = 0.01f
+
+@Composable
+private fun NudgeButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    tag: String
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(28.dp)
+            .background(Slate800, RoundedCornerShape(6.dp))
+            .testTag(tag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Indigo400,
+            modifier = Modifier.size(16.dp)
+        )
     }
 }

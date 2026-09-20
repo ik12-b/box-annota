@@ -21,8 +21,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
@@ -32,6 +36,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,6 +89,9 @@ import com.example.ui.theme.Slate800
 import com.example.ui.theme.Slate900
 import com.example.ui.theme.Slate950
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val PALETTE_COLORS = listOf(
     0xFFEF4444L, // Red
@@ -881,6 +889,160 @@ fun GeminiSettingsDialog(
                         modifier = Modifier.testTag("gemini_save_btn")
                     ) {
                         Text("Simpan")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BackupSettingsDialog(
+    isFolderConfigured: Boolean,
+    isBackingUp: Boolean,
+    lastBackupAtMillis: Long,
+    onDismiss: () -> Unit,
+    onPickFolder: () -> Unit,
+    onBackupNow: () -> Unit,
+    onClearFolder: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Slate900,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth().testTag("backup_settings_dialog")
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Backup, contentDescription = null, tint = Indigo400)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Backup & Pemulihan", color = Slate100, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Tutup", tint = Slate400)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Android selalu menghapus semua data aplikasi saat di-uninstall — tanpa kecuali. Satu-satunya cara agar PDF, anotasi, dan transkripsi kamu tetap ada setelah install ulang adalah menyimpan salinannya di folder pilihanmu sendiri (mis. di dalam folder Documents), di luar penyimpanan aplikasi.",
+                    color = Slate400,
+                    fontSize = 11.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Status card
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isFolderConfigured) Emerald400.copy(alpha = 0.12f) else Slate950)
+                        .border(
+                            1.dp,
+                            if (isFolderConfigured) Emerald400.copy(alpha = 0.35f) else Slate800,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .padding(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (isFolderConfigured) Icons.Default.CloudDone else Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = if (isFolderConfigured) Emerald400 else Slate400
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = if (isFolderConfigured) "Folder backup aktif" else "Belum ada folder backup",
+                                color = if (isFolderConfigured) Emerald400 else Slate100,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (isFolderConfigured) {
+                                val lastBackupText = if (lastBackupAtMillis > 0L) {
+                                    "Backup terakhir: " + SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+                                        .format(Date(lastBackupAtMillis))
+                                } else {
+                                    "Belum pernah backup"
+                                }
+                                Text(text = lastBackupText, color = Slate400, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+
+                if (isBackingUp) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(color = Indigo400, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Membuat backup...", color = Slate400, fontSize = 11.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Button(
+                    onClick = onPickFolder,
+                    colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("pick_backup_folder_btn")
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (isFolderConfigured) "Ganti Folder Backup" else "Pilih Folder Backup")
+                }
+
+                if (isFolderConfigured) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = onBackupNow,
+                            enabled = !isBackingUp,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Indigo400),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("backup_now_btn")
+                        ) {
+                            Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Backup Sekarang", fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = onClearFolder,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.testTag("clear_backup_folder_btn")
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = "Lepas folder", modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Catatan: setelah install ulang, izin akses folder ikut direset oleh Android (bagian dari sistem keamanannya, bukan bug). File backup-nya sendiri tetap utuh di folder itu — cukup pilih folder yang SAMA sekali lagi di sini, dan datanya otomatis dipulihkan.",
+                    color = Slate700,
+                    fontSize = 10.sp
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = Slate800),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Tutup", color = Slate100)
                     }
                 }
             }

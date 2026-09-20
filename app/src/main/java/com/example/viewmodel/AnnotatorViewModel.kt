@@ -8,12 +8,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.api.GeminiResult
 import com.example.api.GeminiTranscriptionService
+import com.example.backup.BackupManager
 import com.example.ml.TextLineDetector
 import com.example.model.AnnotationBox
 import com.example.model.AppMode
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
 import com.example.model.LabelPresets
+import com.example.model.MIN_BOX_SIZE_NORM
 import com.example.model.TranscriptionLine
 import com.example.pdf.PdfManager
 import com.example.util.DatasetExporter
@@ -73,7 +75,11 @@ data class AnnotatorUiState(
     val showGeminiSettingsDialog: Boolean = false,
     val isAutoTranscribing: Boolean = false,
     val autoTranscribeCurrent: Int = 0,
-    val autoTranscribeTotal: Int = 0
+    val autoTranscribeTotal: Int = 0,
+    val backupFolderConfigured: Boolean = false,
+    val isBackingUp: Boolean = false,
+    val lastBackupAtMillis: Long = 0L,
+    val showBackupDialog: Boolean = false
 ) {
     val currentBoxes: List<AnnotationBox>
         get() = pageAnnotations[currentPage] ?: emptyList()
@@ -137,6 +143,9 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private val geminiService = GeminiTranscriptionService()
     private var autoTranscribeBatchJob: Job? = null
 
+    private val backupManager = BackupManager(context)
+    private var autoBackupJob: Job? = null
+
     init {
         // SharedPreferences reads are fast/local — safe to do synchronously here.
         val savedKey = try { geminiPrefs.getString(PREF_GEMINI_API_KEY, "") ?: "" } catch (_: Exception) { "" }
@@ -146,9 +155,26 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (_: Exception) {
             GeminiTranscriptionService.DEFAULT_MODEL
         }
-        _uiState.update { it.copy(geminiApiKey = savedKey, geminiModel = savedModel) }
+        _uiState.update {
+            it.copy(
+                geminiApiKey = savedKey,
+                geminiModel = savedModel,
+                backupFolderConfigured = backupManager.isFolderConfigured,
+                lastBackupAtMillis = backupManager.lastBackupAtMillis
+            )
+        }
 
         viewModelScope.launch(safetyNetHandler) {
+            // Defensive-only path: this fires when internal storage was wiped
+            // (e.g. "Clear data") while the backup folder pref somehow
+            // survived — which normally doesn't happen on a real uninstall,
+            // since that wipes SharedPreferences too. The real recovery path
+            // after an actual uninstall+reinstall is the user manually
+            // picking their backup folder again via setBackupFolder(), which
+            // also attempts a restore — see that function below.
+            if (!sessionFile.exists() && backupManager.isFolderConfigured) {
+                try { backupManager.restoreNow() } catch (_: Exception) {}
+            }
             tryRestoreSession()
             _uiState.update { it.copy(isRestoringSession = false) }
         }
@@ -288,6 +314,38 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         }
         updateBox(box.copy(rotation = 0f))
         showToast("Rotasi box direset (0.0°).")
+    }
+
+    /**
+     * Button-based move/resize for the selected box — an alternative to
+     * dragging on the canvas, useful for small precise nudges that are fiddly
+     * to do exactly right with a fingertip. dx/dy/dw/dh are normalized deltas
+     * (0..1 of the page's width/height), positive = right/down/wider/taller.
+     * Unlike corner-drag resizing, this always keeps the box's own (x, y)
+     * fixed and only grows/shrinks toward the bottom-right — simple and
+     * unambiguous regardless of the box's rotation, since rotation never
+     * changes what x/y/width/height themselves mean.
+     */
+    fun nudgeSelectedBox(dx: Float, dy: Float) {
+        val box = _uiState.value.primarySelectedBox
+        if (box == null) {
+            showToast("Pilih box dulu untuk menggeser posisi.")
+            return
+        }
+        val newX = (box.x + dx).coerceIn(0f, 1f - box.width)
+        val newY = (box.y + dy).coerceIn(0f, 1f - box.height)
+        updateBox(box.copy(x = newX, y = newY))
+    }
+
+    fun resizeSelectedBox(dWidth: Float, dHeight: Float) {
+        val box = _uiState.value.primarySelectedBox
+        if (box == null) {
+            showToast("Pilih box dulu untuk mengubah ukuran.")
+            return
+        }
+        val newWidth = (box.width + dWidth).coerceIn(MIN_BOX_SIZE_NORM, 1f - box.x)
+        val newHeight = (box.height + dHeight).coerceIn(MIN_BOX_SIZE_NORM, 1f - box.y)
+        updateBox(box.copy(width = newWidth, height = newHeight))
     }
 
     fun toggleRotatePanel() {
@@ -651,12 +709,20 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(renderScale = scale.coerceIn(0.5f, 3.5f)) }
     }
 
+    /**
+     * Only flags high-overlap boxes of the SAME class — e.g. two accidental
+     * duplicate "Paragraph" boxes on top of each other. A "Bingkai / Border"
+     * box legitimately containing "Paragraph"/"Title" boxes inside it (or a
+     * "Table / Grid" box containing cell text) is normal nested structure in
+     * an object-detection dataset, not a mistake, so cross-class overlap is
+     * never flagged here.
+     */
     private fun checkOverlap() {
         val boxes = _uiState.value.currentBoxes
         var overlap = false
         for (i in 0 until boxes.size) {
             for (j in i + 1 until boxes.size) {
-                if (boxes[i].calculateIoU(boxes[j]) > 0.35f) {
+                if (boxes[i].classId == boxes[j].classId && boxes[i].calculateIoU(boxes[j]) > 0.35f) {
                     overlap = true
                     break
                 }
@@ -1136,6 +1202,71 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         saveSession()
     }
 
+    // ---------------------------------------------------------------------
+    // Backup & restore (survives uninstall/reinstall) — see BackupManager's
+    // class doc for why this needs a user-picked shared-storage folder and
+    // can't be done silently against app-private storage alone.
+    // ---------------------------------------------------------------------
+
+    fun showBackupDialog(show: Boolean) = _uiState.update { it.copy(showBackupDialog = show) }
+
+    /**
+     * Called once the user has granted folder access via the system picker.
+     * If this device currently has no document open (a strong signal this is
+     * a fresh install/reinstall rather than an in-progress project), and the
+     * picked folder already holds a backup, it's restored immediately so the
+     * user lands right back where they left off. Otherwise the folder is
+     * just wired up for future auto-backups, without touching current work.
+     */
+    fun onBackupFolderPicked(uri: Uri) {
+        viewModelScope.launch(safetyNetHandler) {
+            backupManager.setBackupFolder(uri)
+            _uiState.update { it.copy(backupFolderConfigured = true) }
+
+            val shouldRestore = !_uiState.value.hasDocument && backupManager.hasExistingBackup()
+            if (shouldRestore) {
+                val restored = try { backupManager.restoreNow() } catch (_: Exception) { false }
+                if (restored) {
+                    val loaded = tryRestoreSession()
+                    if (loaded) {
+                        showToast("Data lama berhasil dipulihkan dari backup.")
+                    } else {
+                        showToast("Backup ditemukan tapi gagal dimuat. File PDF sumber mungkin sudah tidak ada.")
+                    }
+                    return@launch
+                }
+            }
+
+            showToast("Folder backup diatur. Backup otomatis akan berjalan di latar belakang.")
+        }
+    }
+
+    fun triggerManualBackup() {
+        if (!backupManager.isFolderConfigured) {
+            showToast("Pilih folder backup dulu.")
+            return
+        }
+        autoBackupJob?.cancel()
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isBackingUp = true) }
+            val ok = try { backupManager.backupNow() } catch (_: Exception) { false }
+            _uiState.update {
+                it.copy(
+                    isBackingUp = false,
+                    lastBackupAtMillis = if (ok) backupManager.lastBackupAtMillis else it.lastBackupAtMillis
+                )
+            }
+            showToast(if (ok) "Backup berhasil disimpan." else "Backup gagal. Periksa akses folder.")
+        }
+    }
+
+    fun clearBackupFolder() {
+        autoBackupJob?.cancel()
+        backupManager.clearBackupFolder()
+        _uiState.update { it.copy(backupFolderConfigured = false, lastBackupAtMillis = 0L) }
+        showToast("Folder backup dilepas. Backup otomatis dimatikan.")
+    }
+
     /**
      * Debounced autosave: rapid-fire edits (dragging a box, spamming undo) no
      * longer each spawn their own disk write — only the last one in a burst
@@ -1146,6 +1277,29 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         saveJob = viewModelScope.launch(safetyNetHandler + Dispatchers.IO) {
             delay(350)
             writeSessionToDisk()
+            scheduleAutoBackup()
+        }
+    }
+
+    /**
+     * Debounced (separately from, and more coarsely than, the session
+     * autosave above) mirror of session.json + documents/ + crops/ out to the
+     * user's chosen backup folder — the only thing that makes any of this
+     * data survive an uninstall. No-ops silently if no folder is configured.
+     */
+    private fun scheduleAutoBackup() {
+        if (!backupManager.isFolderConfigured) return
+        autoBackupJob?.cancel()
+        autoBackupJob = viewModelScope.launch(safetyNetHandler + Dispatchers.IO) {
+            delay(3000)
+            _uiState.update { it.copy(isBackingUp = true) }
+            val ok = try { backupManager.backupNow() } catch (_: Exception) { false }
+            _uiState.update {
+                it.copy(
+                    isBackingUp = false,
+                    lastBackupAtMillis = if (ok) backupManager.lastBackupAtMillis else it.lastBackupAtMillis
+                )
+            }
         }
     }
 

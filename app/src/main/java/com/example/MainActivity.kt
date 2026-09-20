@@ -58,6 +58,7 @@ import com.example.model.AppMode
 import com.example.ui.components.AddClassDialog
 import com.example.ui.components.AnnotationCanvasView
 import com.example.ui.components.AnnotatorToolbar
+import com.example.ui.components.BackupSettingsDialog
 import com.example.ui.components.BottomActionControls
 import com.example.ui.components.ExportDatasetDialog
 import com.example.ui.components.FineRotatePanel
@@ -98,6 +99,14 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
     ) { uri ->
         if (uri != null) {
             viewModel.openPdfFromUri(uri)
+        }
+    }
+
+    val backupFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.onBackupFolderPicked(uri)
         }
     }
 
@@ -159,6 +168,8 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 },
                 hasTranscriptionLines = uiState.transcriptionLines.isNotEmpty(),
                 onSwitchToTranscription = { viewModel.switchToTranscriptionMode() },
+                isBackupConfigured = uiState.backupFolderConfigured,
+                onOpenBackupSettings = { viewModel.showBackupDialog(true) },
                 modifier = Modifier.statusBarsPadding()
             )
         },
@@ -197,6 +208,8 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 onAutoDetect = { viewModel.autoDetectBoxes() },
                 hasAnyBoxes = uiState.totalBoxesAllPages > 0,
                 onFinishLabeling = { viewModel.finishLabelingAndStartTranscription() },
+                onResizeBoxWidth = { dw -> viewModel.resizeSelectedBox(dw, 0f) },
+                onResizeBoxHeight = { dh -> viewModel.resizeSelectedBox(0f, dh) },
                 modifier = Modifier.navigationBarsPadding()
             )
         }
@@ -213,6 +226,7 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 hasDocument = uiState.hasDocument,
                 isRestoringSession = uiState.isRestoringSession,
                 onOpenPdf = { openPdfLauncher.launch(arrayOf("application/pdf")) },
+                onRestoreFromBackup = { viewModel.showBackupDialog(true) },
                 boxes = uiState.currentBoxes,
                 classes = uiState.classes,
                 activeClassId = uiState.activeClassId,
@@ -315,6 +329,8 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                         viewModel.selectBox(it)
                         viewModel.deleteSelectedBox()
                     },
+                    onNudgeBox = { dx, dy -> viewModel.nudgeSelectedBox(dx, dy) },
+                    onResizeBox = { dw, dh -> viewModel.resizeSelectedBox(dw, dh) },
                     onResetProject = {
                         viewModel.resetProject()
                         showRightDrawer = false
@@ -472,6 +488,18 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             currentModel = uiState.geminiModel,
             onDismiss = { viewModel.showGeminiSettingsDialog(false) },
             onSave = { apiKey, modelName -> viewModel.saveGeminiSettings(apiKey, modelName) }
+        )
+    }
+
+    if (uiState.showBackupDialog) {
+        BackupSettingsDialog(
+            isFolderConfigured = uiState.backupFolderConfigured,
+            isBackingUp = uiState.isBackingUp,
+            lastBackupAtMillis = uiState.lastBackupAtMillis,
+            onDismiss = { viewModel.showBackupDialog(false) },
+            onPickFolder = { backupFolderLauncher.launch(null) },
+            onBackupNow = { viewModel.triggerManualBackup() },
+            onClearFolder = { viewModel.clearBackupFolder() }
         )
     }
 }
