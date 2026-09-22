@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Visibility
@@ -77,6 +78,7 @@ import com.example.api.GeminiTranscriptionService
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
 import com.example.model.LabelPresets
+import com.example.model.TranscriptionEngine
 import com.example.ui.theme.Emerald400
 import com.example.ui.theme.Indigo400
 import com.example.ui.theme.Indigo500
@@ -1039,6 +1041,388 @@ fun BackupSettingsDialog(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     Button(
                         onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = Slate800),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Tutup", color = Slate100)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DetectorModelDialog(
+    modelLabel: String,
+    isCustomModel: Boolean,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onPickModel: () -> Unit,
+    onResetDefault: () -> Unit
+) {
+    Dialog(onDismissRequest = { if (!isLoading) onDismiss() }) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Slate900,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth().testTag("detector_model_dialog")
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Memory, contentDescription = null, tint = Indigo400)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Model Deteksi", color = Slate100, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (!isLoading) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Tutup", tint = Slate400)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Dipakai oleh tombol \"Deteksi\" untuk menemukan baris teks otomatis. Ganti dengan model deteksi teks lain (.onnx) kalau model default kurang cocok untuk jenis naskah/tulisan tertentu.",
+                    color = Slate400,
+                    fontSize = 11.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isCustomModel) Indigo600.copy(alpha = 0.15f) else Slate950)
+                        .border(
+                            1.dp,
+                            if (isCustomModel) Indigo500.copy(alpha = 0.4f) else Slate800,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .padding(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Memory,
+                            contentDescription = null,
+                            tint = if (isCustomModel) Indigo400 else Slate400
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = if (isCustomModel) "Model Custom Aktif" else "Model Default Aktif",
+                                color = if (isCustomModel) Indigo400 else Slate100,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(text = modelLabel, color = Slate400, fontSize = 10.sp)
+                        }
+                    }
+                }
+
+                if (isLoading) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(color = Indigo400, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Memuat model...", color = Slate400, fontSize = 11.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Button(
+                    onClick = onPickModel,
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("pick_detector_model_btn")
+                ) {
+                    Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Pilih Model Custom (.onnx)")
+                }
+
+                if (isCustomModel) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onResetDefault,
+                        enabled = !isLoading,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("reset_detector_model_btn")
+                    ) {
+                        Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Kembali ke Model Default", fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Model harus berupa model deteksi teks (mis. gaya DB/PaddleOCR) dengan 1 input gambar dan 1 output peta probabilitas. Model yang tidak cocok tidak akan membuat aplikasi crash — hasil deteksinya cuma jadi kosong.",
+                    color = Slate700,
+                    fontSize = 10.sp
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Button(
+                        onClick = onDismiss,
+                        enabled = !isLoading,
+                        colors = ButtonDefaults.buttonColors(containerColor = Slate800),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Tutup", color = Slate100)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RecognizerModelDialog(
+    engine: TranscriptionEngine,
+    modelLabel: String,
+    isCustomModel: Boolean,
+    hasCodec: Boolean,
+    codecSize: Int,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onSetEngine: (TranscriptionEngine) -> Unit,
+    onPickModel: () -> Unit,
+    onResetModel: () -> Unit,
+    onPickCodec: () -> Unit,
+    onClearCodec: () -> Unit,
+    onOpenGeminiKeySettings: () -> Unit = {}
+) {
+    Dialog(onDismissRequest = { if (!isLoading) onDismiss() }) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Slate900,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth().testTag("recognizer_model_dialog")
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Memory, contentDescription = null, tint = Indigo400)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Mesin Transkripsi Otomatis", color = Slate100, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (!isLoading) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Tutup", tint = Slate400)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Engine toggle
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Slate950)
+                        .padding(3.dp)
+                ) {
+                    listOf(
+                        TranscriptionEngine.GEMINI to "Gemini API",
+                        TranscriptionEngine.ON_DEVICE to "On-Device"
+                    ).forEach { (eng, label) ->
+                        val selected = engine == eng
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (selected) Indigo600 else Color.Transparent)
+                                .clickable(
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    indication = null
+                                ) { onSetEngine(eng) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (selected) Color.White else Slate400,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                if (engine == TranscriptionEngine.GEMINI) {
+                    Text(
+                        text = "Memakai Gemini API — butuh internet dan API key (atur lewat ikon gear terpisah). Akurat untuk berbagai jenis tulisan, tapi tergantung koneksi dan kuota.",
+                        color = Slate400,
+                        fontSize = 11.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = onOpenGeminiKeySettings,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Indigo400),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("open_gemini_key_settings_btn")
+                    ) {
+                        Text("Atur API Key Gemini", fontSize = 12.sp)
+                    }
+                } else {
+                    Text(
+                        text = "Berjalan sepenuhnya offline di perangkat, tidak butuh internet/API key. Butuh dua hal: model .onnx dan file codec (peta indeks→karakter) yang cocok satu sama lain.",
+                        color = Slate400,
+                        fontSize = 11.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Model status
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isCustomModel) Indigo600.copy(alpha = 0.15f) else Slate950)
+                            .border(1.dp, if (isCustomModel) Indigo500.copy(alpha = 0.4f) else Slate800, RoundedCornerShape(10.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Memory, contentDescription = null, tint = if (isCustomModel) Indigo400 else Slate400)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (isCustomModel) "Model Custom" else "Model Default",
+                                    color = if (isCustomModel) Indigo400 else Slate100,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(text = modelLabel, color = Slate400, fontSize = 10.sp)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onPickModel,
+                            enabled = !isLoading,
+                            colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("pick_recognizer_model_btn")
+                        ) {
+                            Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Ganti Model", fontSize = 11.sp)
+                        }
+                        if (isCustomModel) {
+                            OutlinedButton(
+                                onClick = onResetModel,
+                                enabled = !isLoading,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("reset_recognizer_model_btn")
+                            ) {
+                                Icon(Icons.Default.LinkOff, contentDescription = "Kembali ke default", modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Codec status
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (hasCodec) Emerald400.copy(alpha = 0.12f) else Slate950)
+                            .border(1.dp, if (hasCodec) Emerald400.copy(alpha = 0.35f) else Slate800, RoundedCornerShape(10.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Layers, contentDescription = null, tint = if (hasCodec) Emerald400 else Slate400)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (hasCodec) "Codec Termuat" else "Codec Belum Diatur",
+                                    color = if (hasCodec) Emerald400 else Slate100,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (hasCodec) "$codecSize baris/karakter" else "Wajib diisi sebelum transkripsi on-device bisa jalan",
+                                    color = Slate400,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onPickCodec,
+                            enabled = !isLoading,
+                            colors = ButtonDefaults.buttonColors(containerColor = Indigo600),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("pick_recognizer_codec_btn")
+                        ) {
+                            Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pilih Codec (.txt)", fontSize = 11.sp)
+                        }
+                        if (hasCodec) {
+                            OutlinedButton(
+                                onClick = onClearCodec,
+                                enabled = !isLoading,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("clear_recognizer_codec_btn")
+                            ) {
+                                Icon(Icons.Default.LinkOff, contentDescription = "Lepas codec", modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    }
+
+                    if (isLoading) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(color = Indigo400, modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "Memuat...", color = Slate400, fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Codec harus punya baris sejumlah (jumlah kelas keluaran model − 1), urut sesuai indeks kelas mulai dari 1 (kelas 0 = blank CTC, tidak perlu baris). Kalau jumlahnya tidak cocok, aplikasi akan menolak memakainya (bukan diam-diam salah tebak) dan memberi tahu jumlah yang seharusnya.",
+                        color = Slate700,
+                        fontSize = 10.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Button(
+                        onClick = onDismiss,
+                        enabled = !isLoading,
                         colors = ButtonDefaults.buttonColors(containerColor = Slate800),
                         shape = RoundedCornerShape(8.dp)
                     ) {

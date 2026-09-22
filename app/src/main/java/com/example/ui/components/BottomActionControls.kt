@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.FirstPage
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.LastPage
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RotateLeft
@@ -112,6 +113,7 @@ fun BottomActionControls(
     onFinishLabeling: () -> Unit = {},
     onResizeBoxWidth: (Float) -> Unit = {},
     onResizeBoxHeight: (Float) -> Unit = {},
+    onOpenDetectorSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -241,6 +243,21 @@ fun BottomActionControls(
                 onDismissRequest = { showMoreMenu = false },
                 modifier = Modifier.background(Slate900)
             ) {
+                Text(
+                    text = "MODEL DETEKSI",
+                    color = Slate700,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                DropdownMenuItem(
+                    text = { Text("Ganti Model Deteksi (.onnx)", color = Slate400) },
+                    leadingIcon = { Icon(Icons.Default.Memory, contentDescription = null, tint = Indigo400) },
+                    onClick = { onOpenDetectorSettings(); showMoreMenu = false },
+                    modifier = Modifier.testTag("bottom_detector_settings_btn")
+                )
+
+                HorizontalDivider(color = Slate800)
                 Text(
                     text = "BOX",
                     color = Slate700,

@@ -3,19 +3,23 @@ package com.example.viewmodel
 import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.api.GeminiResult
 import com.example.api.GeminiTranscriptionService
 import com.example.backup.BackupManager
+import com.example.ml.RecognitionResult
 import com.example.ml.TextLineDetector
+import com.example.ml.TextLineRecognizer
 import com.example.model.AnnotationBox
 import com.example.model.AppMode
 import com.example.model.ExportFormat
 import com.example.model.LabelClass
 import com.example.model.LabelPresets
 import com.example.model.MIN_BOX_SIZE_NORM
+import com.example.model.TranscriptionEngine
 import com.example.model.TranscriptionLine
 import com.example.pdf.PdfManager
 import com.example.util.DatasetExporter
@@ -79,7 +83,18 @@ data class AnnotatorUiState(
     val backupFolderConfigured: Boolean = false,
     val isBackingUp: Boolean = false,
     val lastBackupAtMillis: Long = 0L,
-    val showBackupDialog: Boolean = false
+    val showBackupDialog: Boolean = false,
+    val detectorModelLabel: String = "Model Default (Manuskrip)",
+    val isCustomDetectorModel: Boolean = false,
+    val isLoadingDetectorModel: Boolean = false,
+    val showDetectorModelDialog: Boolean = false,
+    val transcriptionEngine: TranscriptionEngine = TranscriptionEngine.GEMINI,
+    val recognizerModelLabel: String = "Muharaf Arabic HTR (default)",
+    val isCustomRecognizerModel: Boolean = false,
+    val hasRecognizerCodec: Boolean = false,
+    val recognizerCodecSize: Int = 0,
+    val isLoadingRecognizerModel: Boolean = false,
+    val showRecognizerModelDialog: Boolean = false
 ) {
     val currentBoxes: List<AnnotationBox>
         get() = pageAnnotations[currentPage] ?: emptyList()
@@ -104,11 +119,25 @@ data class AnnotatorUiState(
         get() = transcriptionLines.count { it.text.isNotBlank() }
 }
 
+/** Unifies Gemini and on-device recognition results for the auto-transcribe flow below. */
+private sealed class EngineResult {
+    data class Success(val text: String) : EngineResult()
+    data class Failure(val message: String) : EngineResult()
+    /** Needs a one-time setup step (API key, or a codec) before it can run at all. */
+    data class NeedsSetup(val message: String) : EngineResult()
+}
+
 class AnnotatorViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val PREF_GEMINI_API_KEY = "gemini_api_key"
         private const val PREF_GEMINI_MODEL = "gemini_model"
+        private const val PREF_CUSTOM_DETECTOR_ENABLED = "custom_detector_enabled"
+        private const val CUSTOM_DETECTOR_FILE_NAME = "custom_detector.onnx"
+        private const val PREF_TRANSCRIPTION_ENGINE = "transcription_engine"
+        private const val PREF_CUSTOM_RECOGNIZER_ENABLED = "custom_recognizer_enabled"
+        private const val CUSTOM_RECOGNIZER_FILE_NAME = "custom_recognizer.onnx"
+        private const val RECOGNIZER_CODEC_FILE_NAME = "recognizer_codec.txt"
     }
 
     private val context = application.applicationContext
@@ -116,6 +145,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private val datasetExporter = DatasetExporter(context)
     private val transcriptionExporter = TranscriptionExporter(context)
     private val textLineDetector = TextLineDetector(context)
+    private val textLineRecognizer = TextLineRecognizer(context)
 
     // Any unexpected exception inside a fire-and-forget launch (render / autosave)
     // is swallowed here instead of propagating and force-closing the app.
@@ -146,6 +176,16 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     private val backupManager = BackupManager(context)
     private var autoBackupJob: Job? = null
 
+    private val detectorPrefs = context.getSharedPreferences("detector_settings", Context.MODE_PRIVATE)
+    private val customDetectorModelFile: File
+        get() = File(context.filesDir, CUSTOM_DETECTOR_FILE_NAME)
+
+    private val recognizerPrefs = context.getSharedPreferences("recognizer_settings", Context.MODE_PRIVATE)
+    private val customRecognizerModelFile: File
+        get() = File(context.filesDir, CUSTOM_RECOGNIZER_FILE_NAME)
+    private val recognizerCodecFile: File
+        get() = File(context.filesDir, RECOGNIZER_CODEC_FILE_NAME)
+
     init {
         // SharedPreferences reads are fast/local — safe to do synchronously here.
         val savedKey = try { geminiPrefs.getString(PREF_GEMINI_API_KEY, "") ?: "" } catch (_: Exception) { "" }
@@ -155,12 +195,59 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (_: Exception) {
             GeminiTranscriptionService.DEFAULT_MODEL
         }
+        // If a custom detector model was picked in a previous session and its
+        // file still exists on disk, point the detector at it again — this is
+        // a standing app preference (like the Gemini key above), separate from
+        // the backup/restore flow that concerns the user's annotation data.
+        val customDetectorEnabled = try {
+            detectorPrefs.getBoolean(PREF_CUSTOM_DETECTOR_ENABLED, false)
+        } catch (_: Exception) {
+            false
+        }
+        if (customDetectorEnabled && customDetectorModelFile.exists()) {
+            textLineDetector.useCustomModel(customDetectorModelFile)
+        }
+
+        // Same standing-preference pattern for the recognizer: restore a
+        // previously picked custom model and/or codec if their files are
+        // still on disk from a prior session.
+        val savedEngine = try {
+            TranscriptionEngine.valueOf(
+                recognizerPrefs.getString(PREF_TRANSCRIPTION_ENGINE, TranscriptionEngine.GEMINI.name)
+                    ?: TranscriptionEngine.GEMINI.name
+            )
+        } catch (_: Exception) {
+            TranscriptionEngine.GEMINI
+        }
+        val customRecognizerEnabled = try {
+            recognizerPrefs.getBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, false)
+        } catch (_: Exception) {
+            false
+        }
+        if (customRecognizerEnabled && customRecognizerModelFile.exists()) {
+            textLineRecognizer.useCustomModel(customRecognizerModelFile)
+        }
+        if (recognizerCodecFile.exists()) {
+            try {
+                val lines = recognizerCodecFile.readLines().filter { it.isNotEmpty() }
+                if (lines.isNotEmpty()) textLineRecognizer.setCodec(lines)
+            } catch (_: Exception) {
+            }
+        }
+
         _uiState.update {
             it.copy(
                 geminiApiKey = savedKey,
                 geminiModel = savedModel,
                 backupFolderConfigured = backupManager.isFolderConfigured,
-                lastBackupAtMillis = backupManager.lastBackupAtMillis
+                lastBackupAtMillis = backupManager.lastBackupAtMillis,
+                detectorModelLabel = textLineDetector.currentModelLabel,
+                isCustomDetectorModel = textLineDetector.isCustomModel,
+                transcriptionEngine = savedEngine,
+                recognizerModelLabel = textLineRecognizer.currentModelLabel,
+                isCustomRecognizerModel = textLineRecognizer.isCustomModel,
+                hasRecognizerCodec = textLineRecognizer.hasCodec,
+                recognizerCodecSize = textLineRecognizer.codecSize
             )
         }
 
@@ -1098,30 +1185,65 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /** Auto-transcribes just the currently displayed line, overwriting its text field. */
+    private suspend fun transcribeWithActiveEngine(cropFile: File): EngineResult {
+        return when (_uiState.value.transcriptionEngine) {
+            TranscriptionEngine.GEMINI -> {
+                val apiKey = _uiState.value.geminiApiKey
+                if (apiKey.isBlank()) {
+                    EngineResult.NeedsSetup("Isi API key Gemini dulu di pengaturan.")
+                } else {
+                    when (val result = geminiService.transcribeImage(cropFile, apiKey, _uiState.value.geminiModel)) {
+                        is GeminiResult.Success -> EngineResult.Success(result.text)
+                        is GeminiResult.Failure -> EngineResult.Failure(result.message)
+                    }
+                }
+            }
+            TranscriptionEngine.ON_DEVICE -> {
+                val bitmap = try {
+                    BitmapFactory.decodeFile(cropFile.absolutePath)
+                } catch (_: Exception) {
+                    null
+                }
+                if (bitmap == null) {
+                    EngineResult.Failure("Gagal membaca gambar potongan baris.")
+                } else {
+                    try {
+                        when (val result = textLineRecognizer.recognize(bitmap)) {
+                            is RecognitionResult.Success -> EngineResult.Success(result.text)
+                            is RecognitionResult.Failure -> EngineResult.Failure(result.message)
+                            RecognitionResult.NoCodecConfigured ->
+                                EngineResult.NeedsSetup("Model on-device butuh file codec dulu. Buka Pengaturan Model Pengenalan Teks.")
+                        }
+                    } finally {
+                        if (!bitmap.isRecycled) bitmap.recycle()
+                    }
+                }
+            }
+        }
+    }
+
     fun autoTranscribeCurrentLine() {
         val state = _uiState.value
         val line = state.currentTranscriptionLine ?: return
         if (state.isAutoTranscribing) return
-        if (state.geminiApiKey.isBlank()) {
-            showToast("Isi API key Gemini dulu di pengaturan.")
-            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
-            return
-        }
 
         viewModelScope.launch(safetyNetHandler) {
             _uiState.update { it.copy(isAutoTranscribing = true, autoTranscribeCurrent = 1, autoTranscribeTotal = 1) }
             try {
-                val result = geminiService.transcribeImage(
-                    File(line.cropFilePath),
-                    _uiState.value.geminiApiKey,
-                    _uiState.value.geminiModel
-                )
-                when (result) {
-                    is GeminiResult.Success -> {
+                when (val result = transcribeWithActiveEngine(File(line.cropFilePath))) {
+                    is EngineResult.Success -> {
                         applyTranscribedText(line.id, result.text)
                         showToast("Transkripsi otomatis selesai.")
                     }
-                    is GeminiResult.Failure -> showToast(result.message)
+                    is EngineResult.Failure -> showToast(result.message)
+                    is EngineResult.NeedsSetup -> {
+                        showToast(result.message)
+                        if (state.transcriptionEngine == TranscriptionEngine.GEMINI) {
+                            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+                        } else {
+                            _uiState.update { it.copy(showRecognizerModelDialog = true) }
+                        }
+                    }
                 }
             } finally {
                 _uiState.update { it.copy(isAutoTranscribing = false) }
@@ -1133,11 +1255,6 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     fun autoTranscribeAllRemaining() {
         val state = _uiState.value
         if (state.isAutoTranscribing) return
-        if (state.geminiApiKey.isBlank()) {
-            showToast("Isi API key Gemini dulu di pengaturan.")
-            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
-            return
-        }
 
         val targets = state.transcriptionLines.filter { it.text.isBlank() }
         if (targets.isEmpty()) {
@@ -1155,28 +1272,37 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                     if (!isActive) break
                     _uiState.update { it.copy(autoTranscribeCurrent = index + 1) }
 
-                    val result = geminiService.transcribeImage(
-                        File(target.cropFilePath),
-                        _uiState.value.geminiApiKey,
-                        _uiState.value.geminiModel
-                    )
-                    when (result) {
-                        is GeminiResult.Success -> {
+                    when (val result = transcribeWithActiveEngine(File(target.cropFilePath))) {
+                        is EngineResult.Success -> {
                             applyTranscribedText(target.id, result.text)
                             consecutiveFailures = 0
                         }
-                        is GeminiResult.Failure -> {
+                        is EngineResult.Failure -> {
                             consecutiveFailures++
                             // Stop early on repeated failures (bad key, no network,
-                            // rate limit) instead of burning through the whole batch
-                            // failing the exact same way every single time.
+                            // rate limit, incompatible model) instead of burning
+                            // through the whole batch failing the same way every time.
                             if (consecutiveFailures >= 3) {
                                 showToast("Dihentikan: ${result.message}")
                                 break
                             }
                         }
+                        is EngineResult.NeedsSetup -> {
+                            showToast(result.message)
+                            if (_uiState.value.transcriptionEngine == TranscriptionEngine.GEMINI) {
+                                _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+                            } else {
+                                _uiState.update { it.copy(showRecognizerModelDialog = true) }
+                            }
+                            break
+                        }
                     }
-                    if (isActive) delay(400) // be polite to the API / rate limits
+                    // Only Gemini needs to be polite to a remote rate limit — the
+                    // on-device model has nothing to be polite to, so skip the
+                    // delay there and let batches run at full local speed.
+                    if (isActive && _uiState.value.transcriptionEngine == TranscriptionEngine.GEMINI) {
+                        delay(400)
+                    }
                 }
                 if (isActive) showToast("Transkripsi otomatis batch selesai.")
             } finally {
@@ -1265,6 +1391,202 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         backupManager.clearBackupFolder()
         _uiState.update { it.copy(backupFolderConfigured = false, lastBackupAtMillis = 0L) }
         showToast("Folder backup dilepas. Backup otomatis dimatikan.")
+    }
+
+    // ---------------------------------------------------------------------
+    // Detection model: lets a different .onnx text-detection model replace
+    // the bundled default at runtime, for a manuscript style/script the
+    // default model wasn't trained on. Copied into internal storage (not the
+    // user's backup folder) since this is an app preference, not annotation
+    // data — losing it on uninstall is expected and fine.
+    // ---------------------------------------------------------------------
+
+    fun showDetectorModelDialog(show: Boolean) = _uiState.update { it.copy(showDetectorModelDialog = show) }
+
+    /**
+     * Copies the picked .onnx file into internal storage and switches the
+     * detector to it. Kept even if it turns out to be incompatible — detect()
+     * degrades to "nothing found" rather than crashing (see TextLineDetector),
+     * so a bad model doesn't need to be treated as a hard error here either;
+     * the user can just switch back to default if results look wrong.
+     */
+    fun pickCustomDetectorModel(uri: Uri) {
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isLoadingDetectorModel = true) }
+            try {
+                val targetFile = customDetectorModelFile
+                val copied = withContext(Dispatchers.IO) {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            java.io.FileOutputStream(targetFile).use { output -> input.copyTo(output) }
+                        }
+                        targetFile.exists() && targetFile.length() > 0L
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+
+                if (!copied) {
+                    showToast("Gagal membaca file model yang dipilih.")
+                    return@launch
+                }
+
+                textLineDetector.useCustomModel(targetFile)
+                detectorPrefs.edit().putBoolean(PREF_CUSTOM_DETECTOR_ENABLED, true).apply()
+                _uiState.update {
+                    it.copy(
+                        detectorModelLabel = textLineDetector.currentModelLabel,
+                        isCustomDetectorModel = true
+                    )
+                }
+                showToast("Model deteksi custom aktif: ${targetFile.name}")
+            } finally {
+                _uiState.update { it.copy(isLoadingDetectorModel = false) }
+            }
+        }
+    }
+
+    fun resetDetectorModel() {
+        textLineDetector.useDefaultModel()
+        try {
+            detectorPrefs.edit().putBoolean(PREF_CUSTOM_DETECTOR_ENABLED, false).apply()
+            if (customDetectorModelFile.exists()) customDetectorModelFile.delete()
+        } catch (_: Exception) {
+        }
+        _uiState.update {
+            it.copy(
+                detectorModelLabel = textLineDetector.currentModelLabel,
+                isCustomDetectorModel = false
+            )
+        }
+        showToast("Kembali ke model deteksi default.")
+    }
+
+    // ---------------------------------------------------------------------
+    // On-device text recognition (OCR): a fully offline alternative to the
+    // Gemini API for auto-transcribing line crops. See TextLineRecognizer's
+    // class doc for why a codec (character mapping) must be supplied
+    // explicitly rather than assumed — guessing it wrong would silently put
+    // incorrect text into a research dataset.
+    // ---------------------------------------------------------------------
+
+    fun showRecognizerModelDialog(show: Boolean) = _uiState.update { it.copy(showRecognizerModelDialog = show) }
+
+    fun setTranscriptionEngine(engine: TranscriptionEngine) {
+        try {
+            recognizerPrefs.edit().putString(PREF_TRANSCRIPTION_ENGINE, engine.name).apply()
+        } catch (_: Exception) {
+        }
+        _uiState.update { it.copy(transcriptionEngine = engine) }
+    }
+
+    fun pickCustomRecognizerModel(uri: Uri) {
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isLoadingRecognizerModel = true) }
+            try {
+                val targetFile = customRecognizerModelFile
+                val copied = withContext(Dispatchers.IO) {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            java.io.FileOutputStream(targetFile).use { output -> input.copyTo(output) }
+                        }
+                        targetFile.exists() && targetFile.length() > 0L
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                if (!copied) {
+                    showToast("Gagal membaca file model yang dipilih.")
+                    return@launch
+                }
+                textLineRecognizer.useCustomModel(targetFile)
+                recognizerPrefs.edit().putBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, true).apply()
+                // The previous codec (bundled default or an earlier custom
+                // one) certainly doesn't match a newly swapped-in model.
+                try { if (recognizerCodecFile.exists()) recognizerCodecFile.delete() } catch (_: Exception) {}
+                _uiState.update {
+                    it.copy(
+                        recognizerModelLabel = textLineRecognizer.currentModelLabel,
+                        isCustomRecognizerModel = true,
+                        hasRecognizerCodec = textLineRecognizer.hasCodec,
+                        recognizerCodecSize = textLineRecognizer.codecSize
+                    )
+                }
+                showToast("Model pengenalan teks custom aktif: ${targetFile.name}. Jangan lupa unggah codec-nya juga.")
+            } finally {
+                _uiState.update { it.copy(isLoadingRecognizerModel = false) }
+            }
+        }
+    }
+
+    fun resetRecognizerModel() {
+        textLineRecognizer.useDefaultModel()
+        try {
+            recognizerPrefs.edit().putBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, false).apply()
+            if (customRecognizerModelFile.exists()) customRecognizerModelFile.delete()
+            // A custom codec was for the custom model that's being abandoned
+            // here — the default model now has its own bundled codec loaded
+            // automatically by useDefaultModel() above, so this one is stale.
+            if (recognizerCodecFile.exists()) recognizerCodecFile.delete()
+        } catch (_: Exception) {
+        }
+        _uiState.update {
+            it.copy(
+                recognizerModelLabel = textLineRecognizer.currentModelLabel,
+                isCustomRecognizerModel = false,
+                hasRecognizerCodec = textLineRecognizer.hasCodec,
+                recognizerCodecSize = textLineRecognizer.codecSize
+            )
+        }
+        showToast("Kembali ke model pengenalan teks default (codec bawaan otomatis aktif lagi).")
+    }
+
+    /**
+     * Loads a plain-text codec file: one character/token per line, in class
+     * order starting at class 1 (never include an entry for the class-0
+     * blank). Persisted to internal storage so it survives app restarts.
+     */
+    fun pickRecognizerCodec(uri: Uri) {
+        viewModelScope.launch(safetyNetHandler) {
+            _uiState.update { it.copy(isLoadingRecognizerModel = true) }
+            try {
+                val lines = withContext(Dispatchers.IO) {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readLines() }
+                            ?.filter { it.isNotEmpty() }
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                if (lines.isNullOrEmpty()) {
+                    showToast("Gagal membaca file codec, atau file kosong.")
+                    return@launch
+                }
+                withContext(Dispatchers.IO) {
+                    try {
+                        recognizerCodecFile.writeText(lines.joinToString("\n"))
+                    } catch (_: Exception) {
+                    }
+                }
+                textLineRecognizer.setCodec(lines)
+                _uiState.update {
+                    it.copy(hasRecognizerCodec = true, recognizerCodecSize = lines.size)
+                }
+                showToast("Codec dimuat: ${lines.size} karakter.")
+            } finally {
+                _uiState.update { it.copy(isLoadingRecognizerModel = false) }
+            }
+        }
+    }
+
+    fun clearRecognizerCodec() {
+        textLineRecognizer.clearCodec()
+        try {
+            if (recognizerCodecFile.exists()) recognizerCodecFile.delete()
+        } catch (_: Exception) {
+        }
+        _uiState.update { it.copy(hasRecognizerCodec = false, recognizerCodecSize = 0) }
+        showToast("Codec dilepas.")
     }
 
     /**
@@ -1501,6 +1823,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         try { writeSessionToDisk() } catch (_: Exception) {}
         pdfManager.close()
         textLineDetector.close()
+        textLineRecognizer.close()
         _uiState.value.currentPageBitmap?.let {
             if (!it.isRecycled) it.recycle()
         }

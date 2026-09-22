@@ -60,11 +60,13 @@ import com.example.ui.components.AnnotationCanvasView
 import com.example.ui.components.AnnotatorToolbar
 import com.example.ui.components.BackupSettingsDialog
 import com.example.ui.components.BottomActionControls
+import com.example.ui.components.DetectorModelDialog
 import com.example.ui.components.ExportDatasetDialog
 import com.example.ui.components.FineRotatePanel
 import com.example.ui.components.GeminiSettingsDialog
 import com.example.ui.components.LeftClassDrawer
 import com.example.ui.components.PresetClassesDialog
+import com.example.ui.components.RecognizerModelDialog
 import com.example.ui.components.RightBoxDrawer
 import com.example.ui.components.TranscriptionExportDialog
 import com.example.ui.components.TranscriptionModeScreen
@@ -107,6 +109,30 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
     ) { uri ->
         if (uri != null) {
             viewModel.onBackupFolderPicked(uri)
+        }
+    }
+
+    val detectorModelLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.pickCustomDetectorModel(uri)
+        }
+    }
+
+    val recognizerModelLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.pickCustomRecognizerModel(uri)
+        }
+    }
+
+    val recognizerCodecLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.pickRecognizerCodec(uri)
         }
     }
 
@@ -210,6 +236,7 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 onFinishLabeling = { viewModel.finishLabelingAndStartTranscription() },
                 onResizeBoxWidth = { dw -> viewModel.resizeSelectedBox(dw, 0f) },
                 onResizeBoxHeight = { dh -> viewModel.resizeSelectedBox(0f, dh) },
+                onOpenDetectorSettings = { viewModel.showDetectorModelDialog(true) },
                 modifier = Modifier.navigationBarsPadding()
             )
         }
@@ -385,7 +412,7 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 onTextChange = { viewModel.updateTranscriptionText(it) },
                 onPrev = { viewModel.prevTranscriptionLine() },
                 onNext = { viewModel.nextTranscriptionLine() },
-                onOpenGeminiSettings = { viewModel.showGeminiSettingsDialog(true) },
+                onOpenGeminiSettings = { viewModel.showRecognizerModelDialog(true) },
                 onAutoTranscribeCurrent = { viewModel.autoTranscribeCurrentLine() },
                 onAutoTranscribeAll = { viewModel.autoTranscribeAllRemaining() },
                 onCancelAutoTranscribe = { viewModel.cancelAutoTranscribeBatch() },
@@ -500,6 +527,38 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             onPickFolder = { backupFolderLauncher.launch(null) },
             onBackupNow = { viewModel.triggerManualBackup() },
             onClearFolder = { viewModel.clearBackupFolder() }
+        )
+    }
+
+    if (uiState.showDetectorModelDialog) {
+        DetectorModelDialog(
+            modelLabel = uiState.detectorModelLabel,
+            isCustomModel = uiState.isCustomDetectorModel,
+            isLoading = uiState.isLoadingDetectorModel,
+            onDismiss = { viewModel.showDetectorModelDialog(false) },
+            onPickModel = { detectorModelLauncher.launch(arrayOf("*/*")) },
+            onResetDefault = { viewModel.resetDetectorModel() }
+        )
+    }
+
+    if (uiState.showRecognizerModelDialog) {
+        RecognizerModelDialog(
+            engine = uiState.transcriptionEngine,
+            modelLabel = uiState.recognizerModelLabel,
+            isCustomModel = uiState.isCustomRecognizerModel,
+            hasCodec = uiState.hasRecognizerCodec,
+            codecSize = uiState.recognizerCodecSize,
+            isLoading = uiState.isLoadingRecognizerModel,
+            onDismiss = { viewModel.showRecognizerModelDialog(false) },
+            onSetEngine = { engine -> viewModel.setTranscriptionEngine(engine) },
+            onPickModel = { recognizerModelLauncher.launch(arrayOf("*/*")) },
+            onResetModel = { viewModel.resetRecognizerModel() },
+            onPickCodec = { recognizerCodecLauncher.launch(arrayOf("*/*", "text/plain")) },
+            onClearCodec = { viewModel.clearRecognizerCodec() },
+            onOpenGeminiKeySettings = {
+                viewModel.showRecognizerModelDialog(false)
+                viewModel.showGeminiSettingsDialog(true)
+            }
         )
     }
 }

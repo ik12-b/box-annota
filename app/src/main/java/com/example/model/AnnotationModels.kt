@@ -108,6 +108,12 @@ data class TranscriptionLine(
     val text: String = ""
 )
 
+/** Which engine powers automatic transcription in Transcription mode. */
+enum class TranscriptionEngine {
+    GEMINI,
+    ON_DEVICE
+}
+
 enum class TouchHandle {
     NONE,
     TOP_LEFT,

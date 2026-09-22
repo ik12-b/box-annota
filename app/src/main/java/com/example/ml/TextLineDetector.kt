@@ -8,27 +8,33 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.nio.FloatBuffer
 import java.util.ArrayDeque
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Runs the bundled PP-OCRv6-tiny manuscript text-detection ONNX model (a DB /
- * Differentiable-Binarization detector) over a page bitmap and turns its output
- * probability map into a list of normalized bounding boxes, so labeling can start
- * from a set of pre-detected line boxes instead of drawing every one by hand.
+ * Runs a text-detection ONNX model (a DB / Differentiable-Binarization
+ * detector — the bundled PP-OCRv6-tiny manuscript model by default, or a
+ * user-supplied .onnx file, see [useCustomModel]) over a page bitmap and
+ * turns its output probability map into a list of normalized bounding boxes,
+ * so labeling can start from a set of pre-detected line boxes instead of
+ * drawing every one by hand.
  *
- * Every public entry point is defensive on purpose: a broken/incompatible model,
- * an OOM during inference, or any other failure returns an empty list instead of
- * throwing, so a detection problem never force-closes the app — it just behaves
- * as if nothing was detected, and the user can still draw boxes manually.
+ * Every public entry point is defensive on purpose: a broken/incompatible
+ * model, an OOM during inference, or any other failure returns an empty list
+ * instead of throwing, so a detection problem never force-closes the app —
+ * it just behaves as if nothing was detected, and the user can still draw
+ * boxes manually. This matters more once a user can swap in an arbitrary
+ * model file: a custom model with an unexpected shape/output layout must
+ * degrade gracefully, not crash.
  */
 class TextLineDetector(private val context: Context) {
 
     companion object {
         private const val MODEL_ASSET_PATH = "models/text_det_manuscript.onnx"
-        private const val INPUT_NAME = "x"
+        private const val DEFAULT_MODEL_LABEL = "Model Default (Manuskrip)"
         private const val MAX_SIDE = 960
         private const val STRIDE = 32
         private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
@@ -38,23 +44,65 @@ class TextLineDetector(private val context: Context) {
     private var env: OrtEnvironment? = null
     private var session: OrtSession? = null
     private var loadFailed = false
+    // Discovered from the loaded model itself rather than hardcoded, since a
+    // custom uploaded model may not name its input tensor "x" the way the
+    // bundled PaddleOCR-style model does.
+    private var inputName: String = "x"
+
+    /** File of a user-supplied replacement model, or null to use the bundled default. */
+    private var customModelFile: File? = null
+
+    val isCustomModel: Boolean
+        get() = customModelFile != null
+
+    val currentModelLabel: String
+        get() = customModelFile?.name ?: DEFAULT_MODEL_LABEL
+
+    /**
+     * Switches detection over to [file] (an .onnx model on disk) starting
+     * from the next [detect] call. Loading is lazy and happens on the
+     * background dispatcher inside [detect]/[ensureSession] — this call
+     * itself just closes the currently-loaded session and points at the new
+     * file, it doesn't validate the model.
+     */
+    fun useCustomModel(file: File) {
+        closeSessionOnly()
+        customModelFile = file
+        loadFailed = false
+    }
+
+    /** Reverts to the bundled default model starting from the next [detect] call. */
+    fun useDefaultModel() {
+        closeSessionOnly()
+        customModelFile = null
+        loadFailed = false
+    }
 
     private fun ensureSession(): OrtSession? {
         session?.let { return it }
         if (loadFailed) return null
         return try {
-            val bytes = context.assets.open(MODEL_ASSET_PATH).use { it.readBytes() }
+            val modelFile = customModelFile
+            val bytes = if (modelFile != null) {
+                modelFile.readBytes()
+            } else {
+                context.assets.open(MODEL_ASSET_PATH).use { it.readBytes() }
+            }
             val environment = OrtEnvironment.getEnvironment()
             val options = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
             }
             val newSession = environment.createSession(bytes, options)
+            inputName = newSession.inputNames.firstOrNull() ?: "x"
             env = environment
             session = newSession
             newSession
         } catch (_: Throwable) {
-            // Missing/corrupt asset, unsupported ops, OOM loading weights, etc. —
-            // detection just becomes unavailable rather than crashing the app.
+            // Missing/corrupt file, unsupported ops, OOM loading weights, an
+            // incompatible custom model, etc. — detection just becomes
+            // unavailable rather than crashing the app. If this was a custom
+            // model, the caller (ViewModel) surfaces this and offers to fall
+            // back to the default; it is never silently retried in a loop.
             loadFailed = true
             null
         }
@@ -102,7 +150,7 @@ class TextLineDetector(private val context: Context) {
             val tensor = OnnxTensor.createTensor(env, chwBuffer, longArrayOf(1, 3, newH.toLong(), newW.toLong()))
             inputTensor = tensor
 
-            activeSession.run(mapOf(INPUT_NAME to tensor)).use { result ->
+            activeSession.run(mapOf(inputName to tensor)).use { result ->
                 val outputTensor = result[0] as? OnnxTensor ?: return@withContext emptyList()
                 val shape = outputTensor.info.shape
                 if (shape.size != 4) return@withContext emptyList()
@@ -121,6 +169,9 @@ class TextLineDetector(private val context: Context) {
         } catch (_: OutOfMemoryError) {
             emptyList()
         } catch (_: Throwable) {
+            // A custom model with an incompatible input/output shape lands
+            // here too (wrong rank, mismatched tensor name never resolved,
+            // etc.) — same graceful "nothing detected" outcome, never a crash.
             emptyList()
         } finally {
             try { inputTensor?.close() } catch (_: Exception) {}
@@ -195,9 +246,13 @@ class TextLineDetector(private val context: Context) {
         return if (r <= 0) STRIDE else r
     }
 
-    fun close() {
+    private fun closeSessionOnly() {
         try { session?.close() } catch (_: Exception) {}
         session = null
+    }
+
+    fun close() {
+        closeSessionOnly()
         // OrtEnvironment is a process-wide singleton — do not close it here.
         env = null
     }
