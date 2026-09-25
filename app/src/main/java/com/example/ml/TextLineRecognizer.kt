@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.DoubleBuffer
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
@@ -214,6 +215,42 @@ class TextLineRecognizer(private val context: Context) {
     }
 
     // ---------------------------------------------------------------------
+    // fp32 -> 16-bit float bit patterns (no dependency on OrtUtil version)
+    // ---------------------------------------------------------------------
+
+    /** IEEE 754 binary16, round-to-nearest. */
+    private fun floatToFp16Bits(value: Float): Short {
+        val bits = java.lang.Float.floatToRawIntBits(value)
+        val sign = (bits ushr 16) and 0x8000
+        val expRaw = (bits ushr 23) and 0xFF
+        var mant = bits and 0x7FFFFF
+        if (expRaw == 0xFF) { // Inf / NaN
+            return (sign or 0x7C00 or (if (mant != 0) 0x200 else 0)).toShort()
+        }
+        val exp = expRaw - 127 + 15
+        if (exp >= 31) return (sign or 0x7C00).toShort() // overflow -> Inf
+        if (exp <= 0) {                                   // subnormal / underflow
+            if (exp < -10) return sign.toShort()
+            mant = mant or 0x800000
+            val shift = 14 - exp
+            var half = mant shr shift
+            if (((mant shr (shift - 1)) and 1) != 0) half += 1
+            return (sign or half).toShort()
+        }
+        var half = sign or (exp shl 10) or (mant shr 13)
+        if ((mant and 0x1000) != 0) half += 1 // carry correctly bumps the exponent
+        return half.toShort()
+    }
+
+    /** bfloat16 = top 16 bits of fp32, round-to-nearest-even. */
+    private fun floatToBf16Bits(value: Float): Short {
+        if (value.isNaN()) return 0x7FC0.toShort()
+        val bits = java.lang.Float.floatToRawIntBits(value)
+        val rounded = bits + 0x7FFF + ((bits ushr 16) and 1)
+        return (rounded ushr 16).toShort()
+    }
+
+    // ---------------------------------------------------------------------
     // Input: gray (0..1) -> tensor of whatever type the model expects
     // ---------------------------------------------------------------------
 
@@ -230,9 +267,18 @@ class TextLineRecognizer(private val context: Context) {
             OnnxJavaType.FLOAT ->
                 OnnxTensor.createTensor(environment, FloatBuffer.wrap(gray), shape)
 
-            // Buffer holds fp32 values; ONNX Runtime converts them to fp16/bf16.
-            OnnxJavaType.FLOAT16, OnnxJavaType.BFLOAT16 ->
-                OnnxTensor.createTensor(environment, FloatBuffer.wrap(gray), shape, inputType)
+            // onnxruntime-android 1.19.2 has no createTensor(FloatBuffer, shape, type)
+            // overload, so pack the 16-bit values ourselves into a direct
+            // native-order ByteBuffer and pass the raw bytes with the type.
+            OnnxJavaType.FLOAT16, OnnxJavaType.BFLOAT16 -> {
+                val isFp16 = inputType == OnnxJavaType.FLOAT16
+                val bb = ByteBuffer.allocateDirect(n * 2).order(ByteOrder.nativeOrder())
+                for (i in 0 until n) {
+                    bb.putShort(if (isFp16) floatToFp16Bits(gray[i]) else floatToBf16Bits(gray[i]))
+                }
+                bb.rewind()
+                OnnxTensor.createTensor(environment, bb, shape, inputType)
+            }
 
             OnnxJavaType.DOUBLE -> {
                 val d = DoubleArray(n) { gray[it].toDouble() }
