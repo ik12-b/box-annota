@@ -269,14 +269,18 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                 onClearSelection = { viewModel.clearSelection() }
             )
 
-            // Fine Rotation & Deskew Panel
+            // Fine Rotation & Deskew Panel — docked at the BOTTOM (above the
+            // bottom toolbar) instead of covering the canvas from the top,
+            // and height-capped with internal scroll (see FineRotatePanel),
+            // so the page image the person is adjusting stays visible the
+            // whole time the panel is open.
             AnimatedVisibility(
                 visible = uiState.showRotatePanel,
-                enter = slideInVertically { -it } + fadeIn(),
-                exit = slideOutVertically { -it } + fadeOut(),
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 8.dp)
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 8.dp)
             ) {
                 FineRotatePanel(
                     currentRotation = uiState.currentRotation,

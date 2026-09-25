@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -52,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -83,23 +87,36 @@ fun FineRotatePanel(
     onResizeBox: (dWidth: Float, dHeight: Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
+    // Hard cap: no matter how much content this panel grows to (rotation
+    // controls, box position/size, micro-steppers, grid toggle...), it must
+    // never cover more than a fraction of the screen, or the box/page being
+    // adjusted becomes invisible underneath it — which is exactly what was
+    // happening when this panel had no height limit at all.
+    val maxPanelHeight = LocalConfiguration.current.screenHeightDp.dp * 0.42f
+
     Card(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = 540.dp)
+            .heightIn(max = maxPanelHeight)
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .shadow(16.dp, RoundedCornerShape(14.dp))
             .border(1.dp, Slate700.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
             .testTag("fine_rotate_panel"),
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Slate900.copy(alpha = 0.96f))
+        // Slightly less opaque than before (0.96 -> 0.90) so even the area
+        // the panel does cover still hints at the canvas underneath.
+        colors = CardDefaults.cardColors(containerColor = Slate900.copy(alpha = 0.90f))
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            // Header: Title, Subtitle, Close button
+            // Header: Title + Close button (subtitle removed — it just
+            // restated what the icon+title already convey, and every row
+            // here costs vertical space this panel can't spare).
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -108,7 +125,7 @@ fun FineRotatePanel(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(24.dp)
                             .background(Amber400.copy(alpha = 0.2f), RoundedCornerShape(6.dp)),
                         contentAlignment = Alignment.Center
                     ) {
@@ -116,47 +133,40 @@ fun FineRotatePanel(
                             imageVector = Icons.Default.Tune,
                             contentDescription = null,
                             tint = Amber400,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(14.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = "Atur Box: Posisi, Ukuran & Rotasi",
-                            color = Slate100,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Panel ini tetap di atas kanvas — box tetap terlihat sambil disesuaikan",
-                            color = Slate400,
-                            fontSize = 10.sp
-                        )
-                    }
+                    Text(
+                        text = "Atur Box: Posisi, Ukuran & Rotasi",
+                        color = Slate100,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 IconButton(
                     onClick = onClose,
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(24.dp)
                         .testTag("close_rotate_panel_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Tutup Panel Rotasi",
                         tint = Slate400,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Position (nudge) + Size — compact, single-tap adjustments that
             // stay visible against the canvas below since this whole panel
             // is a small top-anchored card, not a full-screen menu.
-            Text(text = "POSISI", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(4.dp))
+            Text(text = "POSISI", color = Slate400, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(3.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -187,10 +197,10 @@ fun FineRotatePanel(
                 )
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            Text(text = "UKURAN", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(4.dp))
+            Text(text = "UKURAN", color = Slate400, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(3.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -235,19 +245,19 @@ fun FineRotatePanel(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             androidx.compose.material3.HorizontalDivider(color = Slate800)
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(text = "ROTASI", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(6.dp))
+
+            Text(text = "ROTASI", color = Slate400, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Angle display & Status banner
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Slate950, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -302,22 +312,23 @@ fun FineRotatePanel(
                         containerColor = Slate800,
                         contentColor = Slate100
                     ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                     modifier = Modifier
-                        .height(28.dp)
+                        .height(24.dp)
                         .testTag("reset_rotation_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.RestartAlt,
                         contentDescription = null,
                         tint = Slate100,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier.size(12.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = "Reset 0°", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    Text(text = "Reset 0°", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Continuous Slider (-20° to +20°)
             Row(
@@ -342,16 +353,16 @@ fun FineRotatePanel(
                 Text(text = "+20°", color = Slate400, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Stepper buttons for incremental fine adjustments
             Text(
                 text = "Putar Dikit-Dikit (Micro Steppers):",
                 color = Slate400,
-                fontSize = 10.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.SemiBold
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(3.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -367,7 +378,7 @@ fun FineRotatePanel(
                 FineStepButton(label = "+5.0°", delta = 5.0f, onClick = { onRotateFine(5.0f) }, modifier = Modifier.weight(1f))
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Tools & Grid Toggle Row
             Row(

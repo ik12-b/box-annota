@@ -87,6 +87,36 @@ class TextLineRecognizer(private val context: Context) {
     /** Element type of the model's input tensor, detected in [ensureSession]. */
     private var inputType: OnnxJavaType = OnnxJavaType.FLOAT
 
+    // Channel count (1 = grayscale, 3 = RGB) and target resize height, both
+    // read from the model's own input shape [batch, channels, height, width]
+    // in ensureSession(). Hardcoding these to the bundled Muharaf model's
+    // values (1, 120) is exactly what produced the "Got invalid dimensions"
+    // ORT_INVALID_ARGUMENT error for any other model shape (e.g. a 3-channel,
+    // height-48 custom model) — so they must always come from the graph.
+    private var inputChannels: Int = 1
+    private var inputHeight: Int = TARGET_HEIGHT
+    // Non-null only if the model's width dim is static (not -1/dynamic/symbolic)
+    // — some custom exports require an exact fixed width instead of a
+    // variable one, unlike the bundled Muharaf model.
+    private var inputWidthFixed: Int? = null
+
+    // --- Per-model preprocessing tuning, all reset on useCustomModel()/
+    // useDefaultModel() since a new model almost certainly needs its own
+    // values rather than silently inheriting the previous model's. ---
+
+    // Per-channel normalization applied AFTER scaling pixels to 0..1 (and
+    // after invertColors, if set): value = (value - mean[c]) / std[c].
+    // Null (the default) means "leave as plain 0..1", matching the original
+    // behavior. Array length must equal inputChannels when set.
+    private var normMean: FloatArray? = null
+    private var normStd: FloatArray? = null
+    private var swapRedBlue: Boolean = false
+    private var invertColors: Boolean = false
+    // Some CTC models put the blank token at the LAST class index instead of
+    // index 0 (the Kraken/Muharaf convention this class was originally built
+    // around). false = blank at index 0 (default).
+    private var blankAtEnd: Boolean = false
+
     // Only used when the model's input tensor is an integer type.
     private var inputQuantScale: Float = 1f / 255f
     private var inputQuantZeroPoint: Int? = null
@@ -141,6 +171,7 @@ class TextLineRecognizer(private val context: Context) {
         loadFailed = false
         codec = null
         resetQuantization()
+        resetPreprocessingTuning()
     }
 
     fun useDefaultModel() {
@@ -149,6 +180,7 @@ class TextLineRecognizer(private val context: Context) {
         loadFailed = false
         loadDefaultCodecFromAssets()
         resetQuantization()
+        resetPreprocessingTuning()
     }
 
     /**
@@ -163,6 +195,54 @@ class TextLineRecognizer(private val context: Context) {
 
     fun clearCodec() {
         codec = null
+    }
+
+    /**
+     * Sets per-channel normalization applied after pixels are scaled to
+     * 0..1: `value = (value - mean[c]) / std[c]`. Pass null to reset to
+     * plain 0..1 (the default). Arrays must have [inputChannels] entries —
+     * call this after the model is loaded (i.e. after the first [recognize]
+     * call, or check [currentInputChannels]) so the length is known.
+     * Example: ImageNet-style normalization for a 3-channel model is
+     * `setNormalization(floatArrayOf(0.485f,0.456f,0.406f), floatArrayOf(0.229f,0.224f,0.225f))`.
+     * A model expecting -1..1 instead of 0..1 is `setNormalization(floatArrayOf(0.5f), floatArrayOf(0.5f))`.
+     */
+    fun setNormalization(mean: FloatArray?, std: FloatArray?) {
+        require((mean == null) == (std == null)) { "mean dan std harus sama-sama null atau sama-sama diisi" }
+        if (mean != null && std != null) {
+            require(mean.size == std.size) { "mean dan std harus punya panjang yang sama" }
+            require(std.all { it != 0f }) { "std tidak boleh 0" }
+        }
+        normMean = mean
+        normStd = std
+    }
+
+    /** true = build the RGB tensor's channels as B,G,R instead of R,G,B. Ignored for 1-channel models. */
+    fun setChannelOrder(bgr: Boolean) {
+        swapRedBlue = bgr
+    }
+
+    /** true = invert pixel values (1 - value) after 0..1 scaling, before normalization — for models trained on light-ink-on-dark-page images. */
+    fun setInvertColors(invert: Boolean) {
+        invertColors = invert
+    }
+
+    /** true = the model's CTC blank class is the LAST index instead of index 0. */
+    fun setBlankAtEnd(atEnd: Boolean) {
+        blankAtEnd = atEnd
+    }
+
+    /** Input channel count detected from the loaded model (1 or 3); valid once a model has been loaded. */
+    val currentInputChannels: Int
+        get() = inputChannels
+
+    /** Resets all per-model tuning ([setNormalization], [setChannelOrder], [setInvertColors], [setBlankAtEnd]) to defaults. */
+    fun resetPreprocessingTuning() {
+        normMean = null
+        normStd = null
+        swapRedBlue = false
+        invertColors = false
+        blankAtEnd = false
     }
 
     /**
@@ -203,8 +283,20 @@ class TextLineRecognizer(private val context: Context) {
             }
             val newSession = environment.createSession(bytes, options)
             inputName = newSession.inputNames.firstOrNull() ?: "input"
-            inputType = (newSession.inputInfo[inputName]?.info as? TensorInfo)?.type
-                ?: OnnxJavaType.FLOAT
+            val inputTensorInfo = newSession.inputInfo[inputName]?.info as? TensorInfo
+            inputType = inputTensorInfo?.type ?: OnnxJavaType.FLOAT
+
+            // Expected layout: [batch, channels, height, width]. channels and
+            // height are normally fixed (static) dims even when batch/width
+            // are dynamic (-1 or symbolic) — that's what the "Expected: 3" /
+            // "Expected: 48" in an ORT_INVALID_ARGUMENT error is reporting.
+            // Fall back to the Muharaf defaults only if the model's shape
+            // doesn't actually pin these dims down.
+            val shape = inputTensorInfo?.shape
+            inputChannels = shape?.getOrNull(1)?.takeIf { it > 0 }?.toInt() ?: 1
+            inputHeight = shape?.getOrNull(2)?.takeIf { it > 0 }?.toInt() ?: TARGET_HEIGHT
+            inputWidthFixed = shape?.getOrNull(3)?.takeIf { it > 0 }?.toInt()
+
             env = environment
             session = newSession
             newSession
@@ -395,82 +487,182 @@ class TextLineRecognizer(private val context: Context) {
         var inputTensor: OnnxTensor? = null
         try {
             // Best-effort default preprocessing for a CRNN/CTC line recognizer:
-            // fixed target height preserving aspect ratio, single-channel
-            // grayscale, normalized to 0..1. A swapped-in custom model trained
-            // with different preprocessing (inverted ink/background, different
-            // target height, mean/std normalization, etc.) may need this tuned.
-            val scale = TARGET_HEIGHT.toFloat() / bitmap.height.toFloat()
-            val newW = (bitmap.width * scale).roundToInt().coerceIn(8, MAX_WIDTH)
-            val newH = TARGET_HEIGHT
+            // resize to the target height THIS MODEL declares in its own
+            // input shape (not a hardcoded constant — see inputHeight in
+            // ensureSession), preserving aspect ratio, in either grayscale
+            // (1 channel) or RGB (3 channels) per inputChannels, plus
+            // whatever per-model tuning was set via setNormalization /
+            // setChannelOrder / setInvertColors (see those for details).
+            val targetH = inputHeight
+            val channels = inputChannels
+            val scale = targetH.toFloat() / bitmap.height.toFloat()
+            var newW = (bitmap.width * scale).roundToInt().coerceIn(8, MAX_WIDTH)
+            val newH = targetH
 
-            scaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+            // Some models need an EXACT width, not a variable one. Scale to
+            // fit within it preserving aspect ratio, then letterbox: pad the
+            // remainder on the right with white (paper background), or if
+            // the scaled line is wider than the model allows, crop from the
+            // left edge (keeps the start of the line, which usually matters
+            // more than the tail for a partially-cut recognition run).
+            val fixedW = inputWidthFixed
+            val resizeW = if (fixedW != null) newW.coerceAtMost(fixedW) else newW
+            if (fixedW != null) newW = fixedW
+
+            var working = Bitmap.createScaledBitmap(bitmap, resizeW, newH, true)
+            if (fixedW != null && resizeW != fixedW) {
+                val padded = Bitmap.createBitmap(fixedW, newH, Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(padded)
+                canvas.drawColor(android.graphics.Color.WHITE)
+                canvas.drawBitmap(working, 0f, 0f, null)
+                if (working !== bitmap) working.recycle()
+                working = padded
+            }
+            scaled = working
+
             val pixels = IntArray(newW * newH)
             scaled.getPixels(pixels, 0, newW, 0, 0, newW, newH)
 
-            val gray = FloatArray(newW * newH)
-            for (i in pixels.indices) {
-                val px = pixels[i]
-                val r = (px shr 16) and 0xFF
-                val g = (px shr 8) and 0xFF
-                val b = px and 0xFF
-                gray[i] = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
+            val mean = normMean
+            val std = normStd
+            if (mean != null && mean.size != channels) {
+                return@withContext RecognitionResult.Failure(
+                    "setNormalization: panjang mean/std (${mean.size}) tidak sama dengan channel model ($channels)."
+                )
+            }
+
+            fun normalize(v: Float, c: Int): Float =
+                if (mean != null && std != null) (v - mean[c]) / std[c] else v
+
+            // NCHW, channel-planar: (R or gray) plane, then G plane, then B plane.
+            val planeSize = newW * newH
+            val chw = FloatArray(planeSize * channels)
+            when (channels) {
+                1 -> for (i in pixels.indices) {
+                    val px = pixels[i]
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val b = px and 0xFF
+                    var v = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
+                    if (invertColors) v = 1f - v
+                    chw[i] = normalize(v, 0)
+                }
+                3 -> for (i in pixels.indices) {
+                    val px = pixels[i]
+                    var rv = ((px shr 16) and 0xFF) / 255f
+                    var gv = ((px shr 8) and 0xFF) / 255f
+                    var bv = (px and 0xFF) / 255f
+                    if (invertColors) { rv = 1f - rv; gv = 1f - gv; bv = 1f - bv }
+                    if (swapRedBlue) { val t = rv; rv = bv; bv = t }
+                    chw[i] = normalize(rv, 0)
+                    chw[planeSize + i] = normalize(gv, 1)
+                    chw[2 * planeSize + i] = normalize(bv, 2)
+                }
+                else -> return@withContext RecognitionResult.Failure(
+                    "Model butuh $channels channel input, hanya 1 (grayscale) atau 3 (RGB) yang didukung."
+                )
             }
 
             val environment = this@TextLineRecognizer.env
                 ?: return@withContext RecognitionResult.Failure("Model belum siap.")
             val tensor = buildInputTensor(
                 environment,
-                gray,
-                longArrayOf(1, 1, newH.toLong(), newW.toLong())
+                chw,
+                longArrayOf(1, channels.toLong(), newH.toLong(), newW.toLong())
             )
             inputTensor = tensor
 
             activeSession.run(mapOf(inputName to tensor)).use { result ->
                 val outputTensor = result[0] as? OnnxTensor
                     ?: return@withContext RecognitionResult.Failure("Output model tidak terbaca.")
-                val shape = outputTensor.info.shape
-                if (shape.size != 4) {
+                val outShape = outputTensor.info.shape
+                if (outShape.size < 2) {
                     return@withContext RecognitionResult.Failure(
-                        "Bentuk output model tidak sesuai (rank ${shape.size}, diharapkan 4)."
+                        "Bentuk output model tidak sesuai (rank ${outShape.size}, minimal 2)."
                     )
-                }
-                val vocabSize = shape[1].toInt()
-                val seqLen = shape[3].toInt()
-                if (vocabSize <= 0 || seqLen <= 0) {
-                    return@withContext RecognitionResult.Failure("Output model kosong.")
                 }
                 // The codec must have exactly one entry per non-blank class —
                 // a size mismatch means this codec almost certainly wasn't
                 // built for this exact model, and every decoded character
                 // from here on would be shifted/wrong. Refuse rather than
                 // silently emitting misaligned text.
-                val expectedCodecSize = vocabSize - 1
-                if (activeCodec.size != expectedCodecSize) {
+                val expectedVocab = activeCodec.size + 1
+
+                // Find which output axis IS the vocab/class axis by matching
+                // its size to expectedVocab exactly — this works regardless
+                // of the model's output layout ([1,vocab,1,seq], [1,seq,vocab],
+                // [1,vocab,seq], NHWC-ish variants, etc.), because we never
+                // guess: an axis either matches the codec size or it doesn't.
+                val vocabAxis = outShape.indices.firstOrNull { outShape[it].toInt() == expectedVocab }
+                    ?: return@withContext RecognitionResult.Failure(
+                        "Tidak ada dimensi output yang cocok dengan ukuran codec: model menghasilkan " +
+                            "bentuk ${outShape.joinToString(prefix = "[", postfix = "]")}, tapi codec " +
+                            "punya ${activeCodec.size} baris (butuh dimensi bernilai $expectedVocab). " +
+                            "Kemungkinan codec ini bukan untuk model ini, atau layout output model " +
+                            "tidak didukung."
+                    )
+                // The sequence axis: the other axis with size > 1. (All
+                // remaining axes — batch, and any singleton dims — are
+                // expected to be exactly 1; their index is always 0 and
+                // contributes nothing to the flat offset below.)
+                val seqAxis = outShape.indices
+                    .filter { it != vocabAxis && outShape[it] > 1 }
+                    .maxByOrNull { outShape[it] }
+                    ?: return@withContext RecognitionResult.Failure(
+                        "Tidak ditemukan dimensi urutan (sequence) pada output model " +
+                            "${outShape.joinToString(prefix = "[", postfix = "]")}."
+                    )
+                val vocabSize = outShape[vocabAxis].toInt()
+                val seqLen = outShape[seqAxis].toInt()
+                if (vocabSize <= 0 || seqLen <= 0) {
+                    return@withContext RecognitionResult.Failure("Output model kosong.")
+                }
+                // Every other axis (batch, and any extra singleton dims) must
+                // be size 1 — the flat-index math below assumes that. A
+                // third axis with size > 1 would mean a layout with more
+                // structure than a plain [.., vocab, .., seq, ..] recognizer
+                // output, which this decoder doesn't know how to interpret;
+                // refuse rather than silently reading the wrong elements.
+                val strayAxis = outShape.indices.firstOrNull {
+                    it != vocabAxis && it != seqAxis && outShape[it] > 1
+                }
+                if (strayAxis != null) {
                     return@withContext RecognitionResult.Failure(
-                        "Codec tidak cocok dengan model: model ini punya $vocabSize kelas keluaran " +
-                            "(butuh codec $expectedCodecSize baris), tapi codec yang dimuat punya " +
-                            "${activeCodec.size} baris. Kemungkinan codec ini bukan untuk model ini."
+                        "Bentuk output model ${outShape.joinToString(prefix = "[", postfix = "]")} punya " +
+                            "lebih dari 2 dimensi berukuran >1 (di luar batch); layout ini tidak didukung."
                     )
                 }
 
-                val logits = readScores(outputTensor, vocabSize * seqLen)
-                // Layout is [1, vocab, 1, seq] (row-major): class c, timestep t
-                // sits at c * seqLen + t.
+                // Row-major strides over the FULL output shape, so we can
+                // index (class, timestep) correctly no matter where those
+                // two axes sit among any extra singleton dims.
+                val strides = LongArray(outShape.size)
+                var acc = 1L
+                for (i in outShape.indices.reversed()) {
+                    strides[i] = acc
+                    acc *= outShape[i].coerceAtLeast(1)
+                }
+                val total = acc.toInt()
+                val logits = readScores(outputTensor, total)
+                val vocabStride = strides[vocabAxis]
+                val seqStride = strides[seqAxis]
+
+                val blankIndex = if (blankAtEnd) vocabSize - 1 else 0
                 var prevClass = -1
                 val sb = StringBuilder()
                 for (t in 0 until seqLen) {
                     var bestClass = 0
                     var bestScore = Float.NEGATIVE_INFINITY
                     for (c in 0 until vocabSize) {
-                        val v = logits[c * seqLen + t]
+                        val v = logits[(c * vocabStride + t * seqStride).toInt()]
                         if (v > bestScore) {
                             bestScore = v
                             bestClass = c
                         }
                     }
-                    // Greedy CTC decode: collapse consecutive repeats, drop blank (class 0).
-                    if (bestClass != prevClass && bestClass != 0) {
-                        val charIndex = bestClass - 1
+                    // Greedy CTC decode: collapse consecutive repeats, drop blank.
+                    if (bestClass != prevClass && bestClass != blankIndex) {
+                        val charIndex = if (blankAtEnd) bestClass else bestClass - 1
                         if (charIndex in activeCodec.indices) {
                             sb.append(activeCodec[charIndex])
                         }
@@ -496,6 +688,9 @@ class TextLineRecognizer(private val context: Context) {
         try { session?.close() } catch (_: Exception) {}
         session = null
         inputType = OnnxJavaType.FLOAT
+        inputChannels = 1
+        inputHeight = TARGET_HEIGHT
+        inputWidthFixed = null
     }
 
     fun close() {
