@@ -170,7 +170,7 @@ fun AnnotatorToolbar(
         ) {
             Icon(
                 imageVector = Icons.Default.Tune,
-                contentDescription = "Rotasi Presisi & Deskew",
+                contentDescription = "Atur Box: Posisi, Ukuran & Rotasi",
                 tint = if (hasActiveRotation) Amber400 else Slate100,
                 modifier = Modifier.size(18.dp)
             )

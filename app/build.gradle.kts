@@ -39,6 +39,13 @@ android {
       keyAlias = "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
+    // Points at a debug.keystore committed to the repo root (not the
+    // gitignored default ~/.android/debug.keystore) so every build — CI or
+    // local — signs debug APKs with the exact same key. Without this, a
+    // freshly built APK's signature wouldn't match whatever signed the
+    // previous install, and Android refuses to install a mismatched update
+    // (the workaround being to uninstall the old copy first every time,
+    // losing any local-only app state).
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"

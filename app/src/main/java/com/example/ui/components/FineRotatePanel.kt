@@ -20,9 +20,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Rotate90DegreesCcw
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
@@ -73,6 +79,8 @@ fun FineRotatePanel(
     onRotate90: () -> Unit,
     onToggleAlignmentGrid: () -> Unit,
     onClose: () -> Unit,
+    onNudgeBox: (dx: Float, dy: Float) -> Unit = { _, _ -> },
+    onResizeBox: (dWidth: Float, dHeight: Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -114,13 +122,13 @@ fun FineRotatePanel(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = "Rotasi Presisi & Deskew",
+                            text = "Atur Box: Posisi, Ukuran & Rotasi",
                             color = Slate100,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Luruskan kemiringan teks dokumen scan (derajat halus)",
+                            text = "Panel ini tetap di atas kanvas — box tetap terlihat sambil disesuaikan",
                             color = Slate400,
                             fontSize = 10.sp
                         )
@@ -143,6 +151,96 @@ fun FineRotatePanel(
             }
 
             Spacer(modifier = Modifier.height(10.dp))
+
+            // Position (nudge) + Size — compact, single-tap adjustments that
+            // stay visible against the canvas below since this whole panel
+            // is a small top-anchored card, not a full-screen menu.
+            Text(text = "POSISI", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                BoxAdjustButton(
+                    icon = Icons.Default.KeyboardArrowLeft,
+                    onClick = { onNudgeBox(-BOX_ADJUST_STEP, 0f) },
+                    tag = "panel_nudge_left_btn",
+                    modifier = Modifier.weight(1f)
+                )
+                BoxAdjustButton(
+                    icon = Icons.Default.KeyboardArrowUp,
+                    onClick = { onNudgeBox(0f, -BOX_ADJUST_STEP) },
+                    tag = "panel_nudge_up_btn",
+                    modifier = Modifier.weight(1f)
+                )
+                BoxAdjustButton(
+                    icon = Icons.Default.KeyboardArrowDown,
+                    onClick = { onNudgeBox(0f, BOX_ADJUST_STEP) },
+                    tag = "panel_nudge_down_btn",
+                    modifier = Modifier.weight(1f)
+                )
+                BoxAdjustButton(
+                    icon = Icons.Default.KeyboardArrowRight,
+                    onClick = { onNudgeBox(BOX_ADJUST_STEP, 0f) },
+                    tag = "panel_nudge_right_btn",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(text = "UKURAN", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(text = "Lebar", color = Slate400, fontSize = 10.sp, modifier = Modifier.width(34.dp))
+                    BoxAdjustButton(
+                        icon = Icons.Default.Remove,
+                        onClick = { onResizeBox(-BOX_ADJUST_STEP, 0f) },
+                        tag = "panel_width_minus_btn",
+                        modifier = Modifier.weight(1f)
+                    )
+                    BoxAdjustButton(
+                        icon = Icons.Default.Add,
+                        onClick = { onResizeBox(BOX_ADJUST_STEP, 0f) },
+                        tag = "panel_width_plus_btn",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(text = "Tinggi", color = Slate400, fontSize = 10.sp, modifier = Modifier.width(34.dp))
+                    BoxAdjustButton(
+                        icon = Icons.Default.Remove,
+                        onClick = { onResizeBox(0f, -BOX_ADJUST_STEP) },
+                        tag = "panel_height_minus_btn",
+                        modifier = Modifier.weight(1f)
+                    )
+                    BoxAdjustButton(
+                        icon = Icons.Default.Add,
+                        onClick = { onResizeBox(0f, BOX_ADJUST_STEP) },
+                        tag = "panel_height_plus_btn",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            androidx.compose.material3.HorizontalDivider(color = Slate800)
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(text = "ROTASI", color = Slate400, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Angle display & Status banner
             Row(
@@ -325,6 +423,32 @@ fun FineRotatePanel(
                 }
             }
         }
+    }
+}
+
+/** Normalized step (fraction of page width/height) per position/size button tap. */
+private const val BOX_ADJUST_STEP = 0.01f
+
+@Composable
+private fun BoxAdjustButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    tag: String,
+    modifier: Modifier = Modifier
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = modifier
+            .height(30.dp)
+            .background(Slate800, RoundedCornerShape(6.dp))
+            .testTag(tag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Indigo400,
+            modifier = Modifier.size(16.dp)
+        )
     }
 }
 

@@ -286,7 +286,9 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
                     onResetRotation = { viewModel.resetPageRotation() },
                     onRotate90 = { viewModel.rotatePageFine(90f) },
                     onToggleAlignmentGrid = { viewModel.toggleAlignmentGrid() },
-                    onClose = { viewModel.setShowRotatePanel(false) }
+                    onClose = { viewModel.setShowRotatePanel(false) },
+                    onNudgeBox = { dx, dy -> viewModel.nudgeSelectedBox(dx, dy) },
+                    onResizeBox = { dw, dh -> viewModel.resizeSelectedBox(dw, dh) }
                 )
             }
 

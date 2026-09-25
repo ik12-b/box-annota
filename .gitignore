@@ -15,4 +15,9 @@
 .cxx
 local.properties
 .env
-debug.keystore
+# debug.keystore is intentionally committed (NOT ignored) — see the comment
+# next to signingConfigs.debugConfig in app/build.gradle.kts for why: a
+# debug key isn't a real secret (well-known "android" password by Android's
+# own convention), and keeping it stable and identical across every build is
+# what lets a new debug APK install as an *update* over an old one instead
+# of Android refusing it as a signature mismatch.

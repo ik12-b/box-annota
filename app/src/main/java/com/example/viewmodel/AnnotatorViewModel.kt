@@ -27,6 +27,8 @@ import com.example.util.TranscriptionExporter
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +36,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -1251,7 +1255,7 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** Batch-transcribes every line that doesn't have text yet, one request at a time. */
+    /** Batch-transcribes every line that doesn't have text yet, running several requests concurrently. */
     fun autoTranscribeAllRemaining() {
         val state = _uiState.value
         if (state.isAutoTranscribing) return
@@ -1262,49 +1266,72 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
+        // On-device inference is CPU-bound, so concurrency is capped to the
+        // device's core count (each request already runs single-threaded —
+        // see TextLineRecognizer — specifically so running several requests
+        // at once doesn't oversubscribe the CPU). Gemini is network-bound, so
+        // its cap is just about being reasonably polite to the API rather
+        // than about local hardware.
+        val parallelism = if (state.transcriptionEngine == TranscriptionEngine.ON_DEVICE) {
+            Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        } else {
+            3
+        }
+
         autoTranscribeBatchJob = viewModelScope.launch(safetyNetHandler) {
             _uiState.update {
                 it.copy(isAutoTranscribing = true, autoTranscribeCurrent = 0, autoTranscribeTotal = targets.size)
             }
-            var consecutiveFailures = 0
-            try {
-                for ((index, target) in targets.withIndex()) {
-                    if (!isActive) break
-                    _uiState.update { it.copy(autoTranscribeCurrent = index + 1) }
+            val semaphore = Semaphore(parallelism)
+            val completed = java.util.concurrent.atomic.AtomicInteger(0)
+            val consecutiveFailures = java.util.concurrent.atomic.AtomicInteger(0)
+            val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+            val setupPromptShown = java.util.concurrent.atomic.AtomicBoolean(false)
 
-                    when (val result = transcribeWithActiveEngine(File(target.cropFilePath))) {
-                        is EngineResult.Success -> {
-                            applyTranscribedText(target.id, result.text)
-                            consecutiveFailures = 0
-                        }
-                        is EngineResult.Failure -> {
-                            consecutiveFailures++
-                            // Stop early on repeated failures (bad key, no network,
-                            // rate limit, incompatible model) instead of burning
-                            // through the whole batch failing the same way every time.
-                            if (consecutiveFailures >= 3) {
-                                showToast("Dihentikan: ${result.message}")
-                                break
+            try {
+                val jobs = targets.map { target ->
+                    async(Dispatchers.Default) {
+                        if (stopped.get() || !isActive) return@async
+                        semaphore.withPermit {
+                            if (stopped.get() || !isActive) return@withPermit
+                            when (val result = transcribeWithActiveEngine(File(target.cropFilePath))) {
+                                is EngineResult.Success -> {
+                                    applyTranscribedText(target.id, result.text)
+                                    consecutiveFailures.set(0)
+                                }
+                                is EngineResult.Failure -> {
+                                    // Stop early on repeated failures (bad key, no
+                                    // network, rate limit, incompatible model)
+                                    // instead of burning through the whole batch
+                                    // failing the same way every time.
+                                    if (consecutiveFailures.incrementAndGet() >= 3 && stopped.compareAndSet(false, true)) {
+                                        showToast("Dihentikan: ${result.message}")
+                                    }
+                                }
+                                is EngineResult.NeedsSetup -> {
+                                    stopped.set(true)
+                                    if (setupPromptShown.compareAndSet(false, true)) {
+                                        showToast(result.message)
+                                        if (_uiState.value.transcriptionEngine == TranscriptionEngine.GEMINI) {
+                                            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+                                        } else {
+                                            _uiState.update { it.copy(showRecognizerModelDialog = true) }
+                                        }
+                                    }
+                                }
                             }
+                            // Increment exactly once, outside the update{} transform —
+                            // that lambda can be re-invoked on a CAS retry under
+                            // concurrent contention (several lines finishing at once
+                            // is exactly what this batch mode causes), and calling
+                            // incrementAndGet() inside it would double-count on retry.
+                            val newCompletedCount = completed.incrementAndGet()
+                            _uiState.update { it.copy(autoTranscribeCurrent = newCompletedCount) }
                         }
-                        is EngineResult.NeedsSetup -> {
-                            showToast(result.message)
-                            if (_uiState.value.transcriptionEngine == TranscriptionEngine.GEMINI) {
-                                _uiState.update { it.copy(showGeminiSettingsDialog = true) }
-                            } else {
-                                _uiState.update { it.copy(showRecognizerModelDialog = true) }
-                            }
-                            break
-                        }
-                    }
-                    // Only Gemini needs to be polite to a remote rate limit — the
-                    // on-device model has nothing to be polite to, so skip the
-                    // delay there and let batches run at full local speed.
-                    if (isActive && _uiState.value.transcriptionEngine == TranscriptionEngine.GEMINI) {
-                        delay(400)
                     }
                 }
-                if (isActive) showToast("Transkripsi otomatis batch selesai.")
+                jobs.awaitAll()
+                if (isActive && !stopped.get()) showToast("Transkripsi otomatis batch selesai.")
             } finally {
                 _uiState.update { it.copy(isAutoTranscribing = false) }
             }

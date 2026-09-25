@@ -51,8 +51,14 @@ jobs:
           fi
           chmod +x ./gradlew
 
-      # The debug signing config points at ./debug.keystore (gitignored).
-      # Recreate the standard Android debug keystore so signing succeeds.
+      # debug.keystore is now committed to the repo (see .gitignore) rather
+      # than regenerated per run, so every build — CI or local — signs with
+      # the exact same debug key. This step is just a safety net for a fresh
+      # checkout that's somehow missing the file; it should normally be a
+      # no-op. Regenerating it on every run (the old behavior) meant every
+      # CI-built APK had a different signature, which made Android refuse to
+      # install a new build as an *update* over a previous one — only a full
+      # uninstall-then-install worked.
       - name: Generate debug keystore
         run: |
           if [ ! -f "./debug.keystore" ]; then
