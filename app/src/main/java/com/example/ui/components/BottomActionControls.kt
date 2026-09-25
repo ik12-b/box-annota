@@ -216,6 +216,56 @@ fun BottomActionControls(
             tag = "bottom_redo_btn"
         )
 
+        DividerBar()
+
+        // Box controller ("Atur Box: Posisi, Ukuran & Rotasi") and zoom
+        // controls used to be buried inside "Lainnya" — reachable only after
+        // an extra tap through a dropdown. Promoted here, next to Undo/Redo/
+        // Hapus, since adjusting a box's rotation/position and zooming to
+        // see it clearly are both frequent, in-the-moment actions.
+        val hasActiveRotation = kotlin.math.abs(currentRotation) >= 0.05f
+        QuickActionButton(
+            icon = Icons.Default.Tune,
+            label = "Atur Box",
+            tint = if (hasActiveRotation) Amber400 else Slate400,
+            onClick = onToggleRotatePanel,
+            tag = "bottom_box_controller_btn"
+        )
+
+        QuickActionButton(
+            icon = Icons.Default.Remove,
+            label = "Zoom-",
+            onClick = onZoomOut,
+            tag = "bottom_zoom_out_btn"
+        )
+        Box(
+            modifier = Modifier
+                .background(Slate800, RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "${(zoomScale * 100).toInt()}%",
+                color = Slate400,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+        QuickActionButton(
+            icon = Icons.Default.Add,
+            label = "Zoom+",
+            onClick = onZoomIn,
+            tag = "bottom_zoom_in_btn"
+        )
+        QuickActionButton(
+            icon = Icons.Default.Fullscreen,
+            label = "Pembesar",
+            onClick = onZoomFit,
+            tag = "bottom_zoom_fit_btn"
+        )
+
+        DividerBar()
+
         // Delete stays inline (frequent, destructive — worth keeping one tap away)
         QuickActionButton(
             icon = Icons.Default.Delete,
@@ -311,13 +361,19 @@ fun BottomActionControls(
                     val angleLabel = if (kotlin.math.abs(currentRotation) < 0.05f) "0.0°"
                         else if (currentRotation > 0f) "+${String.format(Locale.US, "%.1f", currentRotation)}°"
                         else "${String.format(Locale.US, "%.1f", currentRotation)}°"
-                    QuickActionButton(
-                        icon = Icons.Default.Tune,
-                        label = angleLabel,
-                        tint = if (kotlin.math.abs(currentRotation) < 0.05f) Slate400 else Amber400,
-                        onClick = { onToggleRotatePanel(); showMoreMenu = false },
-                        tag = "bottom_rotate_panel_toggle_btn"
-                    )
+                    Box(
+                        modifier = Modifier
+                            .background(Slate800, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = angleLabel,
+                            color = if (kotlin.math.abs(currentRotation) < 0.05f) Slate400 else Amber400,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                     QuickActionButton(
                         icon = Icons.Default.RotateRight,
                         label = "+0.5°",
@@ -402,37 +458,6 @@ fun BottomActionControls(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                ) {
-                    QuickActionButton(
-                        icon = Icons.Default.Remove,
-                        label = "Zoom-",
-                        onClick = onZoomOut,
-                        tag = "bottom_zoom_out_btn"
-                    )
-                    Text(
-                        text = "${(zoomScale * 100).toInt()}%",
-                        color = Slate400,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 2.dp)
-                    )
-                    QuickActionButton(
-                        icon = Icons.Default.Add,
-                        label = "Zoom+",
-                        onClick = onZoomIn,
-                        tag = "bottom_zoom_in_btn"
-                    )
-                    QuickActionButton(
-                        icon = Icons.Default.Fullscreen,
-                        label = "Fit",
-                        onClick = onZoomFit,
-                        tag = "bottom_zoom_fit_btn"
-                    )
-                }
                 DropdownMenuItem(
                     text = { Text(if (isCrosshairEnabled) "Guide: Aktif" else "Guide: Nonaktif", color = if (isCrosshairEnabled) Indigo400 else Slate400) },
                     leadingIcon = { Icon(Icons.Outlined.FilterCenterFocus, contentDescription = null, tint = if (isCrosshairEnabled) Indigo400 else Slate400) },

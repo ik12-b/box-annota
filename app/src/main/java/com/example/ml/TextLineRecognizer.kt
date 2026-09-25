@@ -116,6 +116,15 @@ class TextLineRecognizer(private val context: Context) {
     // index 0 (the Kraken/Muharaf convention this class was originally built
     // around). false = blank at index 0 (default).
     private var blankAtEnd: Boolean = false
+    // A CRNN scans the image left-to-right regardless of the script's
+    // reading direction, so its decoded token order is the visual/spatial
+    // order — for a right-to-left script (Arabic, the bundled model's
+    // language) that is the REVERSE of logical reading order. true reverses
+    // the decoded character sequence before returning it. Verified against
+    // the bundled Muharaf model: without this, a line reading "كتاب الجبر
+    // والمقابلة" decodes as "ةلباقملاو ربجلا باتك" — same characters,
+    // mirrored order.
+    private var reverseOutput: Boolean = false
 
     // Only used when the model's input tensor is an integer type.
     private var inputQuantScale: Float = 1f / 255f
@@ -130,6 +139,11 @@ class TextLineRecognizer(private val context: Context) {
         // a plain asset, so the default model works out of the box without
         // the user needing to supply anything.
         loadDefaultCodecFromAssets()
+        // See useDefaultModel()'s doc: verified-correct preprocessing for
+        // the bundled Muharaf model. Set here too since useDefaultModel()
+        // is never called for the initial/implicit default-model state.
+        invertColors = true
+        reverseOutput = true
     }
 
     val isCustomModel: Boolean
@@ -181,6 +195,14 @@ class TextLineRecognizer(private val context: Context) {
         loadDefaultCodecFromAssets()
         resetQuantization()
         resetPreprocessingTuning()
+        // Verified defaults for the bundled Muharaf Arabic model (see
+        // reverseOutput's field doc for how these were confirmed): it was
+        // trained on inverted (light-ink-on-dark) images, and Arabic is
+        // right-to-left, so its raw left-to-right CRNN decode must be
+        // reversed. A custom model loaded via useCustomModel() gets neutral
+        // defaults instead — the caller must set these explicitly for it.
+        invertColors = true
+        reverseOutput = true
     }
 
     /**
@@ -232,17 +254,28 @@ class TextLineRecognizer(private val context: Context) {
         blankAtEnd = atEnd
     }
 
+    /**
+     * true = reverse the decoded character sequence before returning it,
+     * because the model's script reads right-to-left but a CRNN always
+     * decodes in left-to-right spatial/scan order. Set once per model, not
+     * per call. See [reverseOutput]'s field doc for the verified example.
+     */
+    fun setRightToLeft(rtl: Boolean) {
+        reverseOutput = rtl
+    }
+
     /** Input channel count detected from the loaded model (1 or 3); valid once a model has been loaded. */
     val currentInputChannels: Int
         get() = inputChannels
 
-    /** Resets all per-model tuning ([setNormalization], [setChannelOrder], [setInvertColors], [setBlankAtEnd]) to defaults. */
+    /** Resets all per-model tuning ([setNormalization], [setChannelOrder], [setInvertColors], [setBlankAtEnd], [setRightToLeft]) to defaults. */
     fun resetPreprocessingTuning() {
         normMean = null
         normStd = null
         swapRedBlue = false
         invertColors = false
         blankAtEnd = false
+        reverseOutput = false
     }
 
     /**
@@ -649,7 +682,7 @@ class TextLineRecognizer(private val context: Context) {
 
                 val blankIndex = if (blankAtEnd) vocabSize - 1 else 0
                 var prevClass = -1
-                val sb = StringBuilder()
+                val tokens = mutableListOf<String>()
                 for (t in 0 until seqLen) {
                     var bestClass = 0
                     var bestScore = Float.NEGATIVE_INFINITY
@@ -664,13 +697,17 @@ class TextLineRecognizer(private val context: Context) {
                     if (bestClass != prevClass && bestClass != blankIndex) {
                         val charIndex = if (blankAtEnd) bestClass else bestClass - 1
                         if (charIndex in activeCodec.indices) {
-                            sb.append(activeCodec[charIndex])
+                            tokens.add(activeCodec[charIndex])
                         }
                     }
                     prevClass = bestClass
                 }
+                // The CRNN always decodes in left-to-right spatial order;
+                // for a right-to-left script that's reversed from logical
+                // reading order (see reverseOutput's field doc).
+                if (reverseOutput) tokens.reverse()
 
-                RecognitionResult.Success(sb.toString().trim())
+                RecognitionResult.Success(tokens.joinToString("").trim())
             }
         } catch (e: UnsupportedTypeException) {
             RecognitionResult.Failure(e.message ?: "Tipe tensor model tidak didukung.")
