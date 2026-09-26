@@ -50,6 +50,8 @@ import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -1204,7 +1206,18 @@ fun RecognizerModelDialog(
     onResetModel: () -> Unit,
     onPickCodec: () -> Unit,
     onClearCodec: () -> Unit,
-    onOpenGeminiKeySettings: () -> Unit = {}
+    onOpenGeminiKeySettings: () -> Unit = {},
+    // Per-model preprocessing tuning — only meaningful (and only shown)
+    // while a CUSTOM recognizer model is active. The bundled default model
+    // already has its own verified-correct values baked in and ignores these.
+    isInvertColors: Boolean = false,
+    isRightToLeft: Boolean = false,
+    isBlankAtEnd: Boolean = false,
+    isBgrChannelOrder: Boolean = false,
+    onSetInvertColors: (Boolean) -> Unit = {},
+    onSetRightToLeft: (Boolean) -> Unit = {},
+    onSetBlankAtEnd: (Boolean) -> Unit = {},
+    onSetBgrChannelOrder: (Boolean) -> Unit = {}
 ) {
     Dialog(onDismissRequest = { if (!isLoading) onDismiss() }) {
         Surface(
@@ -1415,6 +1428,58 @@ fun RecognizerModelDialog(
                         color = Slate700,
                         fontSize = 10.sp
                     )
+
+                    // Preprocessing tuning: only meaningful for a custom
+                    // model — the bundled default model's own correct values
+                    // (invert=true, RTL=true, blank at index 0) are already
+                    // baked into TextLineRecognizer and can't be changed here.
+                    if (isCustomModel) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        HorizontalDivider(color = Slate800)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "PREPROCESSING MODEL CUSTOM",
+                            color = Slate700,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Kalau hasil transkripsi model custom-mu kacau/terbalik, coba atur ini sesuai cara model dilatih.",
+                            color = Slate700,
+                            fontSize = 10.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        RecognizerTuningSwitchRow(
+                            label = "Invert Warna",
+                            hint = "Tinta terang di latar gelap (bukan tinta gelap di kertas terang)",
+                            checked = isInvertColors,
+                            onCheckedChange = onSetInvertColors,
+                            tag = "recognizer_invert_switch"
+                        )
+                        RecognizerTuningSwitchRow(
+                            label = "Baca Kanan-ke-Kiri (RTL)",
+                            hint = "Untuk aksara RTL seperti Arab — balik urutan hasil decode",
+                            checked = isRightToLeft,
+                            onCheckedChange = onSetRightToLeft,
+                            tag = "recognizer_rtl_switch"
+                        )
+                        RecognizerTuningSwitchRow(
+                            label = "Blank di Akhir",
+                            hint = "Kelas blank CTC di indeks terakhir, bukan indeks 0",
+                            checked = isBlankAtEnd,
+                            onCheckedChange = onSetBlankAtEnd,
+                            tag = "recognizer_blank_at_end_switch"
+                        )
+                        RecognizerTuningSwitchRow(
+                            label = "Urutan Channel BGR",
+                            hint = "Untuk model RGB 3-channel yang dilatih dengan urutan BGR",
+                            checked = isBgrChannelOrder,
+                            onCheckedChange = onSetBgrChannelOrder,
+                            tag = "recognizer_bgr_switch"
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1431,6 +1496,34 @@ fun RecognizerModelDialog(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RecognizerTuningSwitchRow(
+    label: String,
+    hint: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    tag: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(text = label, color = Slate100, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = hint, color = Slate700, fontSize = 9.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(checkedTrackColor = Indigo600, checkedThumbColor = Color.White),
+            modifier = Modifier.testTag(tag)
+        )
     }
 }
 

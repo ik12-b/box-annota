@@ -564,7 +564,15 @@ fun AnnotatorApp(viewModel: AnnotatorViewModel = viewModel()) {
             onOpenGeminiKeySettings = {
                 viewModel.showRecognizerModelDialog(false)
                 viewModel.showGeminiSettingsDialog(true)
-            }
+            },
+            isInvertColors = uiState.recognizerInvertColors,
+            isRightToLeft = uiState.recognizerRightToLeft,
+            isBlankAtEnd = uiState.recognizerBlankAtEnd,
+            isBgrChannelOrder = uiState.recognizerBgrChannelOrder,
+            onSetInvertColors = { viewModel.setRecognizerInvertColors(it) },
+            onSetRightToLeft = { viewModel.setRecognizerRightToLeft(it) },
+            onSetBlankAtEnd = { viewModel.setRecognizerBlankAtEnd(it) },
+            onSetBgrChannelOrder = { viewModel.setRecognizerBgrChannelOrder(it) }
         )
     }
 }

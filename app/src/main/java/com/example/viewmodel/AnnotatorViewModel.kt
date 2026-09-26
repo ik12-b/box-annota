@@ -98,7 +98,15 @@ data class AnnotatorUiState(
     val hasRecognizerCodec: Boolean = false,
     val recognizerCodecSize: Int = 0,
     val isLoadingRecognizerModel: Boolean = false,
-    val showRecognizerModelDialog: Boolean = false
+    val showRecognizerModelDialog: Boolean = false,
+    // Per-model preprocessing tuning for the ON-DEVICE recognizer — only
+    // meaningful (and only shown in the UI) for a CUSTOM recognizer model.
+    // The bundled default (Muharaf) already has its own verified-correct
+    // values baked into TextLineRecognizer itself and ignores these.
+    val recognizerInvertColors: Boolean = false,
+    val recognizerRightToLeft: Boolean = false,
+    val recognizerBlankAtEnd: Boolean = false,
+    val recognizerBgrChannelOrder: Boolean = false
 ) {
     val currentBoxes: List<AnnotationBox>
         get() = pageAnnotations[currentPage] ?: emptyList()
@@ -142,6 +150,10 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
         private const val PREF_CUSTOM_RECOGNIZER_ENABLED = "custom_recognizer_enabled"
         private const val CUSTOM_RECOGNIZER_FILE_NAME = "custom_recognizer.onnx"
         private const val RECOGNIZER_CODEC_FILE_NAME = "recognizer_codec.txt"
+        private const val PREF_RECOGNIZER_INVERT = "recognizer_invert_colors"
+        private const val PREF_RECOGNIZER_RTL = "recognizer_right_to_left"
+        private const val PREF_RECOGNIZER_BLANK_AT_END = "recognizer_blank_at_end"
+        private const val PREF_RECOGNIZER_BGR = "recognizer_bgr_channel_order"
     }
 
     private val context = application.applicationContext
@@ -238,6 +250,30 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (_: Exception) {
             }
         }
+        // Per-model preprocessing tuning is only relevant to a custom model
+        // — useCustomModel() above already reset it to neutral defaults, so
+        // only override from saved prefs when a custom model is actually
+        // active (the default model's own useDefaultModel()/init already
+        // set its own correct fixed values and must not be overridden here).
+        val savedInvert: Boolean
+        val savedRtl: Boolean
+        val savedBlankAtEnd: Boolean
+        val savedBgr: Boolean
+        if (customRecognizerEnabled && customRecognizerModelFile.exists()) {
+            savedInvert = try { recognizerPrefs.getBoolean(PREF_RECOGNIZER_INVERT, false) } catch (_: Exception) { false }
+            savedRtl = try { recognizerPrefs.getBoolean(PREF_RECOGNIZER_RTL, false) } catch (_: Exception) { false }
+            savedBlankAtEnd = try { recognizerPrefs.getBoolean(PREF_RECOGNIZER_BLANK_AT_END, false) } catch (_: Exception) { false }
+            savedBgr = try { recognizerPrefs.getBoolean(PREF_RECOGNIZER_BGR, false) } catch (_: Exception) { false }
+            textLineRecognizer.setInvertColors(savedInvert)
+            textLineRecognizer.setRightToLeft(savedRtl)
+            textLineRecognizer.setBlankAtEnd(savedBlankAtEnd)
+            textLineRecognizer.setChannelOrder(savedBgr)
+        } else {
+            savedInvert = false
+            savedRtl = false
+            savedBlankAtEnd = false
+            savedBgr = false
+        }
 
         _uiState.update {
             it.copy(
@@ -251,7 +287,11 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 recognizerModelLabel = textLineRecognizer.currentModelLabel,
                 isCustomRecognizerModel = textLineRecognizer.isCustomModel,
                 hasRecognizerCodec = textLineRecognizer.hasCodec,
-                recognizerCodecSize = textLineRecognizer.codecSize
+                recognizerCodecSize = textLineRecognizer.codecSize,
+                recognizerInvertColors = savedInvert,
+                recognizerRightToLeft = savedRtl,
+                recognizerBlankAtEnd = savedBlankAtEnd,
+                recognizerBgrChannelOrder = savedBgr
             )
         }
 
@@ -1529,17 +1569,34 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 textLineRecognizer.useCustomModel(targetFile)
                 recognizerPrefs.edit().putBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, true).apply()
                 // The previous codec (bundled default or an earlier custom
-                // one) certainly doesn't match a newly swapped-in model.
+                // one) certainly doesn't match a newly swapped-in model —
+                // same for preprocessing tuning: useCustomModel() above
+                // already reset invert/RTL/blank/channel-order to neutral,
+                // so the saved toggle values for a DIFFERENT model must not
+                // linger in prefs or in the UI switches.
                 try { if (recognizerCodecFile.exists()) recognizerCodecFile.delete() } catch (_: Exception) {}
+                try {
+                    recognizerPrefs.edit()
+                        .putBoolean(PREF_RECOGNIZER_INVERT, false)
+                        .putBoolean(PREF_RECOGNIZER_RTL, false)
+                        .putBoolean(PREF_RECOGNIZER_BLANK_AT_END, false)
+                        .putBoolean(PREF_RECOGNIZER_BGR, false)
+                        .apply()
+                } catch (_: Exception) {
+                }
                 _uiState.update {
                     it.copy(
                         recognizerModelLabel = textLineRecognizer.currentModelLabel,
                         isCustomRecognizerModel = true,
                         hasRecognizerCodec = textLineRecognizer.hasCodec,
-                        recognizerCodecSize = textLineRecognizer.codecSize
+                        recognizerCodecSize = textLineRecognizer.codecSize,
+                        recognizerInvertColors = false,
+                        recognizerRightToLeft = false,
+                        recognizerBlankAtEnd = false,
+                        recognizerBgrChannelOrder = false
                     )
                 }
-                showToast("Model pengenalan teks custom aktif: ${targetFile.name}. Jangan lupa unggah codec-nya juga.")
+                showToast("Model pengenalan teks custom aktif: ${targetFile.name}. Jangan lupa unggah codec-nya, dan atur preprocessing (invert/RTL/dll) kalau perlu.")
             } finally {
                 _uiState.update { it.copy(isLoadingRecognizerModel = false) }
             }
@@ -1549,7 +1606,13 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
     fun resetRecognizerModel() {
         textLineRecognizer.useDefaultModel()
         try {
-            recognizerPrefs.edit().putBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, false).apply()
+            recognizerPrefs.edit()
+                .putBoolean(PREF_CUSTOM_RECOGNIZER_ENABLED, false)
+                .putBoolean(PREF_RECOGNIZER_INVERT, false)
+                .putBoolean(PREF_RECOGNIZER_RTL, false)
+                .putBoolean(PREF_RECOGNIZER_BLANK_AT_END, false)
+                .putBoolean(PREF_RECOGNIZER_BGR, false)
+                .apply()
             if (customRecognizerModelFile.exists()) customRecognizerModelFile.delete()
             // A custom codec was for the custom model that's being abandoned
             // here — the default model now has its own bundled codec loaded
@@ -1562,10 +1625,43 @@ class AnnotatorViewModel(application: Application) : AndroidViewModel(applicatio
                 recognizerModelLabel = textLineRecognizer.currentModelLabel,
                 isCustomRecognizerModel = false,
                 hasRecognizerCodec = textLineRecognizer.hasCodec,
-                recognizerCodecSize = textLineRecognizer.codecSize
+                recognizerCodecSize = textLineRecognizer.codecSize,
+                // Not meaningful for the default model (useDefaultModel()
+                // above already set its own correct fixed values), but reset
+                // the switches too so they don't show stale ON state if a
+                // custom model is picked again later.
+                recognizerInvertColors = false,
+                recognizerRightToLeft = false,
+                recognizerBlankAtEnd = false,
+                recognizerBgrChannelOrder = false
             )
         }
         showToast("Kembali ke model pengenalan teks default (codec bawaan otomatis aktif lagi).")
+    }
+
+    /** Per-model preprocessing tuning — only meaningful while a custom recognizer model is active. */
+    fun setRecognizerInvertColors(invert: Boolean) {
+        textLineRecognizer.setInvertColors(invert)
+        try { recognizerPrefs.edit().putBoolean(PREF_RECOGNIZER_INVERT, invert).apply() } catch (_: Exception) {}
+        _uiState.update { it.copy(recognizerInvertColors = invert) }
+    }
+
+    fun setRecognizerRightToLeft(rtl: Boolean) {
+        textLineRecognizer.setRightToLeft(rtl)
+        try { recognizerPrefs.edit().putBoolean(PREF_RECOGNIZER_RTL, rtl).apply() } catch (_: Exception) {}
+        _uiState.update { it.copy(recognizerRightToLeft = rtl) }
+    }
+
+    fun setRecognizerBlankAtEnd(atEnd: Boolean) {
+        textLineRecognizer.setBlankAtEnd(atEnd)
+        try { recognizerPrefs.edit().putBoolean(PREF_RECOGNIZER_BLANK_AT_END, atEnd).apply() } catch (_: Exception) {}
+        _uiState.update { it.copy(recognizerBlankAtEnd = atEnd) }
+    }
+
+    fun setRecognizerBgrChannelOrder(bgr: Boolean) {
+        textLineRecognizer.setChannelOrder(bgr)
+        try { recognizerPrefs.edit().putBoolean(PREF_RECOGNIZER_BGR, bgr).apply() } catch (_: Exception) {}
+        _uiState.update { it.copy(recognizerBgrChannelOrder = bgr) }
     }
 
     /**
